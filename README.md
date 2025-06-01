@@ -35,6 +35,34 @@ DB_DIR=データベースを保存するディレクトリのパス
 DISCORD_TOKEN=DiscordのBotトークン
 ```
 
+### 2️⃣ 実行
+
+まず、ターミナルやコマンドプロンプトで、Botのフォルダに移動します。
+
+```bash
+cd フォルダのパス
+```
+
+移動後、以下のコマンドでボットを起動します。
+
+```
+python timecard-main.py
+```
+
+また、毎回コマンドを入力するのが面倒な場合は、起動用の`.batファイル`を作成することをおすすめします。
+
+```
+@echo off
+cd /d C:\Users\YourName\github\timecard-discord-bot
+python timecard-main.py
+pause
+```
+
+`.bat`ファイルの内容を上記のように設定し、ダブルクリックで起動することで、
+自動でディレクトリ移動 → Bot起動まで実行できます。
+
+※`cd /d`のパス部分は、自分のBotのフォルダパスに合わせてください。
+
 ---
 
 ## 💾 データ管理
