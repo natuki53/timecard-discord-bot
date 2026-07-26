@@ -23,7 +23,10 @@
 #### 必要なもの
 
 - Python 3.9 以上
-- `discord.py`（`pip install discord.py`）
+- 依存パッケージ（`pip install -r requirements.txt`）
+  - `discord.py`
+  - `aiosqlite`
+  - `python-dotenv`
 - `.env` ファイル
 
 #### `.env` の作成
@@ -68,7 +71,8 @@ pause
 ## 💾 データ管理
 
 - 勤務データは **月ごとの SQLite データベースファイル** に保存されます。
-- 出勤・退勤・休憩はユーザーIDごとに管理されます。
+- 出勤中の状態は `active_sessions.db` に保存されます（月をまたいでも退勤可能）。
+- 出勤・退勤・休憩はサーバーID + ユーザーIDごとに管理されます。
 - データは `DB_DIR` で指定したフォルダ内に `work_tracking_YYYY_MM.db` として保存されます。
 - 月ごとの勤務履歴はテーブル名 `history_YYYY_MM` に記録されます。
 
@@ -90,7 +94,7 @@ pause
 ## 🌸 開発者向け補足
 
 - **コアファイル**: `timecard-main.py`
-- データベース構成はSQLiteで、ユーザーごと、月ごとの履歴を管理。
+- データベース構成はSQLite（非同期: aiosqlite）で、サーバー・ユーザーごと、月ごとの履歴を管理。
 - 環境変数管理は `python-dotenv` を使用。
 
 ---

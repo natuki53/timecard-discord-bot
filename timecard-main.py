@@ -11,10 +11,8 @@ logger = logging.getLogger(__name__)
 
 GENERIC_ERROR_MESSAGE = 'エラーが発生しました。しばらくしてから再度お試しください。'
 
-# .envファイルから環境変数を読み込む
 load_dotenv()
 
-# 環境変数からデータベースディレクトリとDiscordトークンを取得
 DB_DIR = os.getenv('DB_DIR')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 
@@ -29,19 +27,16 @@ validate_config()
 
 ACTIVE_DB_PATH = os.path.join(DB_DIR, 'active_sessions.db')
 
-def require_guild(ctx):
-    if ctx.guild is None:
+def require_guild(interaction):
+    if interaction.guild is None:
         return None
-    return ctx.guild.id
+    return interaction.guild.id
 
-# Intentsを設定
 intents = discord.Intents.default()
 intents.message_content = True
 
-# Botの初期化
-bot = discord.Bot(intents=intents)
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-# 月オフセットから年・月キー（YYYY_MM）を取得する関数
 def get_month_key(month_offset=0):
     today = datetime.datetime.now()
     year = today.year
@@ -60,7 +55,6 @@ def get_month_key_from_date(dt):
     return dt.strftime('%Y_%m')
 
 def end_of_month(dt):
-    """指定日の属する月の最終秒を返す（12月→1月も正しく処理）"""
     if isinstance(dt, datetime.date) and not isinstance(dt, datetime.datetime):
         dt = datetime.datetime.combine(dt, datetime.time.min)
     if dt.month == 12:
@@ -68,7 +62,6 @@ def end_of_month(dt):
     return datetime.datetime(dt.year, dt.month + 1, 1) - datetime.timedelta(seconds=1)
 
 def start_of_month(dt):
-    """指定日の属する月の開始日時を返す"""
     if isinstance(dt, datetime.date) and not isinstance(dt, datetime.datetime):
         return datetime.datetime.combine(dt.replace(day=1), datetime.time.min)
     return datetime.datetime(dt.year, dt.month, 1)
@@ -109,12 +102,9 @@ async def get_monthly_table_for_date(dt):
         await conn.commit()
     return table_name, db_path
 
-# 年と月ごとにデータベースファイルのパスを取得する関数
 def get_db_path(month_offset=0):
-    db_path = os.path.join(DB_DIR, f'work_tracking_{get_month_key(month_offset)}.db')
-    return db_path
+    return os.path.join(DB_DIR, f'work_tracking_{get_month_key(month_offset)}.db')
 
-# 出勤中セッション用DBの初期化（月をまたいでも退勤可能）
 async def init_active_db():
     async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
         await conn.execute('''
@@ -162,7 +152,6 @@ async def delete_session_breaks(guild_id, user_id, session_start):
         ''', (guild_id, user_id, session_start))
         await conn.commit()
 
-# 月ごとのテーブルを動的に作成する関数
 async def get_monthly_table(month_offset=0):
     db_path = get_db_path(month_offset)
     table_name = f"history_{get_month_key(month_offset)}"
@@ -171,27 +160,25 @@ async def get_monthly_table(month_offset=0):
         await conn.commit()
     return table_name
 
-# スラッシュコマンドを同期する関数
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
     try:
-        await bot.sync_commands()
-        print("スラッシュコマンドを同期しました")
+        await bot.tree.sync()
+        print('スラッシュコマンドを同期しました')
     except Exception:
         logger.exception('Failed to sync slash commands')
 
-# 出勤コマンド
-@bot.slash_command(name="start", description="出勤時に使うコマンド。出勤時間を記録します。")
-async def start(ctx):
+@bot.tree.command(name='start', description='出勤時に使うコマンド。出勤時間を記録します。')
+async def start(interaction: discord.Interaction):
     try:
-        guild_id = require_guild(ctx)
+        guild_id = require_guild(interaction)
         if guild_id is None:
-            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
         await init_active_db()
-        user_id = ctx.author.id
+        user_id = interaction.user.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('BEGIN IMMEDIATE')
             async with conn.execute(
@@ -203,9 +190,13 @@ async def start(ctx):
             if result:
                 await conn.rollback()
                 if result[1] == 1:
-                    await ctx.respond(f"{ctx.author.mention} さん、休憩中のため出勤できません。まずは /restart コマンドで休憩を終了してください。")
+                    await interaction.response.send_message(
+                        f'{interaction.user.mention} さん、休憩中のため出勤できません。まずは /restart コマンドで休憩を終了してください。'
+                    )
                 else:
-                    await ctx.respond(f"{ctx.author.mention} さん、既に出勤しています。")
+                    await interaction.response.send_message(
+                        f'{interaction.user.mention} さん、既に出勤しています。'
+                    )
                 return
 
             start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -215,12 +206,16 @@ async def start(ctx):
             ''', (guild_id, user_id, start_time))
             await conn.commit()
 
-        await ctx.respond(f"{ctx.author.mention} さん、{start_time} に出勤しました。")
+        await interaction.response.send_message(
+            f'{interaction.user.mention} さん、{start_time} に出勤しました。'
+        )
     except Exception:
         logger.exception('Command failed')
-        await ctx.respond(GENERIC_ERROR_MESSAGE)
+        if interaction.response.is_done():
+            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
+        else:
+            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
 
-# 退勤データを保存（動的な月テーブルに記録）
 async def save_work_history(guild_id, user_id, start_time, end_time, breaks):
     try:
         start_date = datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S').date()
@@ -266,17 +261,16 @@ async def save_work_history(guild_id, user_id, start_time, end_time, breaks):
     except Exception:
         logger.exception('Failed to save work history')
 
-# 退勤コマンド
-@bot.slash_command(name="end", description="退勤時に使うコマンド。退勤時間を記録し、勤務時間を表示します。")
-async def end(ctx):
+@bot.tree.command(name='end', description='退勤時に使うコマンド。退勤時間を記録し、勤務時間を表示します。')
+async def end(interaction: discord.Interaction):
     try:
-        guild_id = require_guild(ctx)
+        guild_id = require_guild(interaction)
         if guild_id is None:
-            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
         await init_active_db()
-        user_id = ctx.author.id
+        user_id = interaction.user.id
 
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('BEGIN IMMEDIATE')
@@ -288,12 +282,16 @@ async def end(ctx):
 
             if not result:
                 await conn.rollback()
-                await ctx.respond(f"{ctx.author.mention} さん、まだ出勤していません。/start を使用してください。")
+                await interaction.response.send_message(
+                    f'{interaction.user.mention} さん、まだ出勤していません。/start を使用してください。'
+                )
                 return
 
             if result[1] == 1:
                 await conn.rollback()
-                await ctx.respond(f"{ctx.author.mention} さん、休憩中のため退勤できません。まずは /restart コマンドで休憩を終了してください。")
+                await interaction.response.send_message(
+                    f'{interaction.user.mention} さん、休憩中のため退勤できません。まずは /restart コマンドで休憩を終了してください。'
+                )
                 return
 
             session_start_str = result[0]
@@ -309,25 +307,28 @@ async def end(ctx):
         await save_work_history(guild_id, user_id, session_start_str, end_time.strftime('%Y-%m-%d %H:%M:%S'), breaks)
         await delete_session_breaks(guild_id, user_id, session_start_str)
 
-            hours, remainder = divmod(work_duration, 3600)
-            minutes = remainder // 60
-            await ctx.respond(f"{ctx.author.mention} さん、退勤しました。勤務時間は {int(hours)}時間{int(minutes)}分です。")
-
+        hours, remainder = divmod(work_duration, 3600)
+        minutes = remainder // 60
+        await interaction.response.send_message(
+            f'{interaction.user.mention} さん、退勤しました。勤務時間は {int(hours)}時間{int(minutes)}分です。'
+        )
     except Exception:
         logger.exception('Command failed')
-        await ctx.respond(GENERIC_ERROR_MESSAGE)
+        if interaction.response.is_done():
+            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
+        else:
+            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
 
-# 休憩開始コマンド
-@bot.slash_command(name="break", description="休憩を開始するコマンド。休憩時間を記録します。")
-async def break_(ctx):
+@bot.tree.command(name='break', description='休憩を開始するコマンド。休憩時間を記録します。')
+async def break_(interaction: discord.Interaction):
     try:
-        guild_id = require_guild(ctx)
+        guild_id = require_guild(interaction)
         if guild_id is None:
-            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
         await init_active_db()
-        user_id = ctx.author.id
+        user_id = interaction.user.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('BEGIN IMMEDIATE')
             async with conn.execute(
@@ -338,10 +339,14 @@ async def break_(ctx):
 
             if not result or result[0] is None:
                 await conn.rollback()
-                await ctx.respond(f"{ctx.author.mention} さん、まずは /start で出勤してください。")
+                await interaction.response.send_message(
+                    f'{interaction.user.mention} さん、まずは /start で出勤してください。'
+                )
             elif result[1] == 1:
                 await conn.rollback()
-                await ctx.respond(f"{ctx.author.mention} さんは既に休憩中です。")
+                await interaction.response.send_message(
+                    f'{interaction.user.mention} さんは既に休憩中です。'
+                )
             else:
                 break_start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 await conn.execute(
@@ -353,22 +358,26 @@ async def break_(ctx):
                     (guild_id, user_id, break_start_time)
                 )
                 await conn.commit()
-                await ctx.respond(f"{ctx.author.mention} さん、{break_start_time} に休憩を開始しました。")
+                await interaction.response.send_message(
+                    f'{interaction.user.mention} さん、{break_start_time} に休憩を開始しました。'
+                )
     except Exception:
         logger.exception('Command failed')
-        await ctx.respond(GENERIC_ERROR_MESSAGE)
+        if interaction.response.is_done():
+            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
+        else:
+            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
 
-# 休憩終了コマンド
-@bot.slash_command(name="restart", description="休憩を終了するコマンド。累積休憩時間に休憩時間を追加します。")
-async def restart(ctx):
+@bot.tree.command(name='restart', description='休憩を終了するコマンド。累積休憩時間に休憩時間を追加します。')
+async def restart(interaction: discord.Interaction):
     try:
-        guild_id = require_guild(ctx)
+        guild_id = require_guild(interaction)
         if guild_id is None:
-            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
         await init_active_db()
-        user_id = ctx.author.id
+        user_id = interaction.user.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('BEGIN IMMEDIATE')
             async with conn.execute(
@@ -379,7 +388,9 @@ async def restart(ctx):
 
             if not result:
                 await conn.rollback()
-                await ctx.respond(f"{ctx.author.mention} さん、休憩中ではありません。/break で休憩を開始してください。")
+                await interaction.response.send_message(
+                    f'{interaction.user.mention} さん、休憩中ではありません。/break で休憩を開始してください。'
+                )
             else:
                 break_end = datetime.datetime.now()
                 break_end_time = break_end.strftime('%Y-%m-%d %H:%M:%S')
@@ -396,21 +407,25 @@ async def restart(ctx):
                     )
                 ''', (break_end_time, guild_id, user_id))
                 await conn.commit()
-                await ctx.respond(f"{ctx.author.mention} さん、{break_end.strftime('%H:%M')} に休憩を終了しました。")
+                await interaction.response.send_message(
+                    f'{interaction.user.mention} さん、{break_end.strftime("%H:%M")} に休憩を終了しました。'
+                )
     except Exception:
         logger.exception('Command failed')
-        await ctx.respond(GENERIC_ERROR_MESSAGE)
+        if interaction.response.is_done():
+            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
+        else:
+            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
 
-# 月ごとの勤務時間を表示するコマンド
-@bot.slash_command(name="monthly", description="今月の合計勤務時間を表示するコマンドです。")
-async def monthly(ctx):
+@bot.tree.command(name='monthly', description='今月の合計勤務時間を表示するコマンドです。')
+async def monthly(interaction: discord.Interaction):
     try:
-        guild_id = require_guild(ctx)
+        guild_id = require_guild(interaction)
         if guild_id is None:
-            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
-        user_id = ctx.author.id
+        user_id = interaction.user.id
         db_path = get_db_path()
         table_name = await get_monthly_table()
         async with aiosqlite.connect(db_path) as conn:
@@ -424,28 +439,36 @@ async def monthly(ctx):
         if total_seconds:
             hours, remainder = divmod(total_seconds, 3600)
             minutes = remainder // 60
-            await ctx.respond(f"{ctx.author.mention} さんの今月の合計勤務時間は {int(hours)}時間{int(minutes)}分です。")
+            await interaction.response.send_message(
+                f'{interaction.user.mention} さんの今月の合計勤務時間は {int(hours)}時間{int(minutes)}分です。'
+            )
         else:
-            await ctx.respond(f"{ctx.author.mention} さん、今月の勤務履歴はありません。")
+            await interaction.response.send_message(
+                f'{interaction.user.mention} さん、今月の勤務履歴はありません。'
+            )
     except Exception:
         logger.exception('Command failed')
-        await ctx.respond(GENERIC_ERROR_MESSAGE)
+        if interaction.response.is_done():
+            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
+        else:
+            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
 
-# 先月の勤務時間を表示するコマンド
-@bot.slash_command(name="last_monthly", description="先月の合計勤務時間を表示するコマンドです。")
-async def last_monthly(ctx):
+@bot.tree.command(name='last_monthly', description='先月の合計勤務時間を表示するコマンドです。')
+async def last_monthly(interaction: discord.Interaction):
     try:
-        guild_id = require_guild(ctx)
+        guild_id = require_guild(interaction)
         if guild_id is None:
-            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
-        user_id = ctx.author.id
+        user_id = interaction.user.id
         table_name = f"history_{get_month_key(month_offset=-1)}"
         db_path = get_db_path(month_offset=-1)
 
         if not os.path.exists(db_path):
-            await ctx.respond(f"{ctx.author.mention} さん、先月の勤務履歴はありません。")
+            await interaction.response.send_message(
+                f'{interaction.user.mention} さん、先月の勤務履歴はありません。'
+            )
             return
 
         async with aiosqlite.connect(db_path) as conn:
@@ -456,7 +479,9 @@ async def last_monthly(ctx):
                 table_exists = await cursor.fetchone()
 
             if not table_exists:
-                await ctx.respond(f"{ctx.author.mention} さん、先月の勤務履歴はありません。")
+                await interaction.response.send_message(
+                    f'{interaction.user.mention} さん、先月の勤務履歴はありません。'
+                )
                 return
 
             async with conn.execute(f'''
@@ -469,12 +494,18 @@ async def last_monthly(ctx):
         if total_seconds:
             hours, remainder = divmod(total_seconds, 3600)
             minutes = remainder // 60
-            await ctx.respond(f"{ctx.author.mention} さんの先月の合計勤務時間は {int(hours)}時間{int(minutes)}分です。")
+            await interaction.response.send_message(
+                f'{interaction.user.mention} さんの先月の合計勤務時間は {int(hours)}時間{int(minutes)}分です。'
+            )
         else:
-            await ctx.respond(f"{ctx.author.mention} さん、先月の勤務履歴はありません。")
+            await interaction.response.send_message(
+                f'{interaction.user.mention} さん、先月の勤務履歴はありません。'
+            )
     except Exception:
         logger.exception('Command failed')
-        await ctx.respond(GENERIC_ERROR_MESSAGE)
+        if interaction.response.is_done():
+            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
+        else:
+            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
 
-# Botを実行
 bot.run(DISCORD_TOKEN)
