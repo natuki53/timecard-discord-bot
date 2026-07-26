@@ -31,8 +31,6 @@ def require_guild(ctx):
 # Intentsを設定
 intents = discord.Intents.default()
 intents.message_content = True
-intents.presences = True
-intents.members = True
 
 # Botの初期化
 bot = discord.Bot(intents=intents)
