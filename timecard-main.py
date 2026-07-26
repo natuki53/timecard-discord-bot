@@ -243,8 +243,8 @@ async def save_work_history(guild_id, user_id, start_time, end_time, breaks):
 
             break_first = calculate_break_in_range(start_dt, end_of_start_month, breaks)
             break_second = calculate_break_in_range(start_of_end_month, end_dt, breaks)
-            work_duration_first_month = (end_of_start_month - start_dt).total_seconds() - break_first
-            work_duration_second_month = (end_dt - start_of_end_month).total_seconds() - break_second
+            work_duration_first_month = max(0, (end_of_start_month - start_dt).total_seconds() - break_first)
+            work_duration_second_month = max(0, (end_dt - start_of_end_month).total_seconds() - break_second)
             table_name_first_month, db_path_first_month = await get_monthly_table_for_date(start_date)
             table_name_second_month, db_path_second_month = await get_monthly_table_for_date(end_date)
 
@@ -262,7 +262,7 @@ async def save_work_history(guild_id, user_id, start_time, end_time, breaks):
                 ''', (guild_id, user_id, start_of_end_month.strftime('%Y-%m-%d %H:%M:%S'), end_time, break_second, work_duration_second_month))
                 await conn.commit()
         else:
-            work_duration = (end_dt - start_dt).total_seconds() - total_break
+            work_duration = max(0, (end_dt - start_dt).total_seconds() - total_break)
             table_name = await get_monthly_table()
             db_path = get_db_path()
             async with aiosqlite.connect(db_path) as conn:
@@ -309,7 +309,7 @@ async def end(ctx):
             end_time = datetime.datetime.now()
             breaks = await get_session_breaks(guild_id, user_id, session_start_str)
             break_total = calculate_break_in_range(start_time, end_time, breaks)
-            work_duration = (end_time - start_time).total_seconds() - break_total
+            work_duration = max(0, (end_time - start_time).total_seconds() - break_total)
 
             await conn.execute('DELETE FROM active_sessions WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
             await conn.commit()
