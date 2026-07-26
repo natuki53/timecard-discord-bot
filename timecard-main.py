@@ -3,7 +3,13 @@ from discord.ext import commands
 import datetime
 import aiosqlite
 import os
+import logging
 from dotenv import load_dotenv
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+GENERIC_ERROR_MESSAGE = 'エラーが発生しました。しばらくしてから再度お試しください。'
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -172,8 +178,8 @@ async def on_ready():
     try:
         await bot.sync_commands()
         print("スラッシュコマンドを同期しました")
-    except Exception as e:
-        print(f"スラッシュコマンドの同期中にエラーが発生しました: {e}")
+    except Exception:
+        logger.exception('Failed to sync slash commands')
 
 # 出勤コマンド
 @bot.slash_command(name="start", description="出勤時に使うコマンド。出勤時間を記録します。")
@@ -210,8 +216,9 @@ async def start(ctx):
             await conn.commit()
 
         await ctx.respond(f"{ctx.author.mention} さん、{start_time} に出勤しました。")
-    except Exception as e:
-        await ctx.respond(f"エラーが発生しました: {e}")
+    except Exception:
+        logger.exception('Command failed')
+        await ctx.respond(GENERIC_ERROR_MESSAGE)
 
 # 退勤データを保存（動的な月テーブルに記録）
 async def save_work_history(guild_id, user_id, start_time, end_time, breaks):
@@ -256,8 +263,8 @@ async def save_work_history(guild_id, user_id, start_time, end_time, breaks):
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (guild_id, user_id, start_time, end_time, total_break, work_duration))
                 await conn.commit()
-    except Exception as e:
-        print(f"Error saving work history: {e}")
+    except Exception:
+        logger.exception('Failed to save work history')
 
 # 退勤コマンド
 @bot.slash_command(name="end", description="退勤時に使うコマンド。退勤時間を記録し、勤務時間を表示します。")
@@ -306,8 +313,9 @@ async def end(ctx):
             minutes = remainder // 60
             await ctx.respond(f"{ctx.author.mention} さん、退勤しました。勤務時間は {int(hours)}時間{int(minutes)}分です。")
 
-    except Exception as e:
-        await ctx.respond(f"エラーが発生しました: {e}")
+    except Exception:
+        logger.exception('Command failed')
+        await ctx.respond(GENERIC_ERROR_MESSAGE)
 
 # 休憩開始コマンド
 @bot.slash_command(name="break", description="休憩を開始するコマンド。休憩時間を記録します。")
@@ -346,8 +354,9 @@ async def break_(ctx):
                 )
                 await conn.commit()
                 await ctx.respond(f"{ctx.author.mention} さん、{break_start_time} に休憩を開始しました。")
-    except Exception as e:
-        await ctx.respond(f"エラーが発生しました: {e}")
+    except Exception:
+        logger.exception('Command failed')
+        await ctx.respond(GENERIC_ERROR_MESSAGE)
 
 # 休憩終了コマンド
 @bot.slash_command(name="restart", description="休憩を終了するコマンド。累積休憩時間に休憩時間を追加します。")
@@ -388,8 +397,9 @@ async def restart(ctx):
                 ''', (break_end_time, guild_id, user_id))
                 await conn.commit()
                 await ctx.respond(f"{ctx.author.mention} さん、{break_end.strftime('%H:%M')} に休憩を終了しました。")
-    except Exception as e:
-        await ctx.respond(f"エラーが発生しました: {e}")
+    except Exception:
+        logger.exception('Command failed')
+        await ctx.respond(GENERIC_ERROR_MESSAGE)
 
 # 月ごとの勤務時間を表示するコマンド
 @bot.slash_command(name="monthly", description="今月の合計勤務時間を表示するコマンドです。")
@@ -417,8 +427,9 @@ async def monthly(ctx):
             await ctx.respond(f"{ctx.author.mention} さんの今月の合計勤務時間は {int(hours)}時間{int(minutes)}分です。")
         else:
             await ctx.respond(f"{ctx.author.mention} さん、今月の勤務履歴はありません。")
-    except Exception as e:
-        await ctx.respond(f"エラーが発生しました: {e}")
+    except Exception:
+        logger.exception('Command failed')
+        await ctx.respond(GENERIC_ERROR_MESSAGE)
 
 # 先月の勤務時間を表示するコマンド
 @bot.slash_command(name="last_monthly", description="先月の合計勤務時間を表示するコマンドです。")
@@ -461,8 +472,9 @@ async def last_monthly(ctx):
             await ctx.respond(f"{ctx.author.mention} さんの先月の合計勤務時間は {int(hours)}時間{int(minutes)}分です。")
         else:
             await ctx.respond(f"{ctx.author.mention} さん、先月の勤務履歴はありません。")
-    except Exception as e:
-        await ctx.respond(f"エラーが発生しました: {e}")
+    except Exception:
+        logger.exception('Command failed')
+        await ctx.respond(GENERIC_ERROR_MESSAGE)
 
 # Botを実行
 bot.run(DISCORD_TOKEN)
