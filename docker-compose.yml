@@ -1,0 +1,13 @@
+services:
+  timecard-bot:
+    build: .
+    container_name: timecard-discord-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./db:/data
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    environment:
+      - DB_DIR=/data

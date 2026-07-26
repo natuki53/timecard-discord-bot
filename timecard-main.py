@@ -26,6 +26,7 @@ def validate_config():
 validate_config()
 
 ACTIVE_DB_PATH = os.path.join(DB_DIR, 'active_sessions.db')
+LEGACY_GUILD_ID = 0  # 旧DB（guild_id なし）から移行したデータ用
 
 def require_guild(interaction):
     if interaction.guild is None:
@@ -94,11 +95,19 @@ HISTORY_TABLE_SCHEMA = '''
     )
 '''
 
+async def ensure_history_schema(conn, table_name):
+    async with conn.execute(f'PRAGMA table_info({table_name})') as cursor:
+        rows = await cursor.fetchall()
+    columns = {row[1] for row in rows}
+    if 'guild_id' not in columns:
+        await conn.execute(f'ALTER TABLE {table_name} ADD COLUMN guild_id INTEGER')
+
 async def get_monthly_table_for_date(dt):
     db_path = get_db_path_for_date(dt)
     table_name = f"history_{get_month_key_from_date(dt)}"
     async with aiosqlite.connect(db_path) as conn:
         await conn.execute(HISTORY_TABLE_SCHEMA.format(table_name=table_name))
+        await ensure_history_schema(conn, table_name)
         await conn.commit()
     return table_name, db_path
 
@@ -127,14 +136,21 @@ async def init_active_db():
                 break_end TEXT
             )
         ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        ''')
         await conn.commit()
 
 async def get_session_breaks(guild_id, user_id, session_start):
     async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
         async with conn.execute('''
             SELECT break_start, break_end FROM break_records
-            WHERE guild_id = ? AND user_id = ? AND break_start >= ? AND break_end IS NOT NULL
-        ''', (guild_id, user_id, session_start)) as cursor:
+            WHERE user_id = ? AND (guild_id = ? OR guild_id = ?)
+              AND break_start >= ? AND break_end IS NOT NULL
+        ''', (user_id, guild_id, LEGACY_GUILD_ID, session_start)) as cursor:
             rows = await cursor.fetchall()
     breaks = []
     for break_start_str, break_end_str in rows:
@@ -148,8 +164,8 @@ async def delete_session_breaks(guild_id, user_id, session_start):
     async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
         await conn.execute('''
             DELETE FROM break_records
-            WHERE guild_id = ? AND user_id = ? AND break_start >= ?
-        ''', (guild_id, user_id, session_start))
+            WHERE user_id = ? AND (guild_id = ? OR guild_id = ?) AND break_start >= ?
+        ''', (user_id, guild_id, LEGACY_GUILD_ID, session_start))
         await conn.commit()
 
 async def get_monthly_table(month_offset=0):
@@ -157,12 +173,167 @@ async def get_monthly_table(month_offset=0):
     table_name = f"history_{get_month_key(month_offset)}"
     async with aiosqlite.connect(db_path) as conn:
         await conn.execute(HISTORY_TABLE_SCHEMA.format(table_name=table_name))
+        await ensure_history_schema(conn, table_name)
         await conn.commit()
     return table_name
+
+async def migrate_legacy_users_to_active_sessions():
+    """月別DBの users テーブルから active_sessions.db へ出勤中データを移行"""
+    if not os.path.isdir(DB_DIR):
+        return
+
+    legacy_sessions = {}
+    for filename in os.listdir(DB_DIR):
+        if not filename.startswith('work_tracking_') or not filename.endswith('.db'):
+            continue
+        db_path = os.path.join(DB_DIR, filename)
+        async with aiosqlite.connect(db_path) as conn:
+            async with conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
+            ) as cursor:
+                if not await cursor.fetchone():
+                    continue
+            async with conn.execute(
+                'SELECT id, start_time, is_on_break, break_start_time, total_break_duration FROM users'
+            ) as cursor:
+                rows = await cursor.fetchall()
+        for user_id, start_time, is_on_break, break_start_time, total_break_duration in rows:
+            if not start_time:
+                continue
+            existing = legacy_sessions.get(user_id)
+            if existing is None or start_time > existing[0]:
+                legacy_sessions[user_id] = (
+                    start_time, is_on_break, break_start_time, total_break_duration or 0
+                )
+
+    if not legacy_sessions:
+        return
+
+    async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
+        for user_id, (start_time, is_on_break, break_start_time, total_break_duration) in legacy_sessions.items():
+            async with conn.execute(
+                'SELECT 1 FROM active_sessions WHERE user_id = ?',
+                (user_id,)
+            ) as cursor:
+                if await cursor.fetchone():
+                    continue
+            await conn.execute('''
+                INSERT INTO active_sessions (guild_id, user_id, start_time, is_on_break, break_start_time, total_break_duration)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (LEGACY_GUILD_ID, user_id, start_time, is_on_break or 0, break_start_time, total_break_duration))
+            if is_on_break and break_start_time:
+                await conn.execute('''
+                    INSERT INTO break_records (guild_id, user_id, break_start)
+                    VALUES (?, ?, ?)
+                ''', (LEGACY_GUILD_ID, user_id, break_start_time))
+        await conn.commit()
+    logger.info('Migrated %d legacy active session(s) from monthly DBs', len(legacy_sessions))
+
+async def migrate_legacy_history_tables():
+    """既存の history テーブルに guild_id カラムを追加"""
+    if not os.path.isdir(DB_DIR):
+        return
+
+    for filename in os.listdir(DB_DIR):
+        if not filename.startswith('work_tracking_') or not filename.endswith('.db'):
+            continue
+        db_path = os.path.join(DB_DIR, filename)
+        month_key = filename.removeprefix('work_tracking_').removesuffix('.db')
+        table_name = f'history_{month_key}'
+        async with aiosqlite.connect(db_path) as conn:
+            async with conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,)
+            ) as cursor:
+                if not await cursor.fetchone():
+                    continue
+            await ensure_history_schema(conn, table_name)
+            await conn.commit()
+
+async def get_assigned_legacy_guild():
+    async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
+        async with conn.execute(
+            "SELECT value FROM app_settings WHERE key = 'legacy_guild_id'"
+        ) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else None
+
+async def assign_all_legacy_data_to_guild(guild_id):
+    """初回コマンド実行時、旧DBの全データをそのサーバーIDに一括紐付け"""
+    if guild_id == LEGACY_GUILD_ID:
+        return
+    if await get_assigned_legacy_guild() is not None:
+        return
+
+    history_updated = 0
+    async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
+        await conn.execute(
+            'UPDATE active_sessions SET guild_id = ? WHERE guild_id = ?',
+            (guild_id, LEGACY_GUILD_ID)
+        )
+        await conn.execute(
+            'UPDATE break_records SET guild_id = ? WHERE guild_id = ?',
+            (guild_id, LEGACY_GUILD_ID)
+        )
+        await conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('legacy_guild_id', ?)",
+            (str(guild_id),)
+        )
+        await conn.commit()
+
+    if os.path.isdir(DB_DIR):
+        for filename in os.listdir(DB_DIR):
+            if not filename.startswith('work_tracking_') or not filename.endswith('.db'):
+                continue
+            db_path = os.path.join(DB_DIR, filename)
+            month_key = filename.removeprefix('work_tracking_').removesuffix('.db')
+            table_name = f'history_{month_key}'
+            async with aiosqlite.connect(db_path) as conn:
+                async with conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,)
+                ) as cursor:
+                    if not await cursor.fetchone():
+                        continue
+                await ensure_history_schema(conn, table_name)
+                cursor = await conn.execute(
+                    f'UPDATE {table_name} SET guild_id = ? WHERE guild_id IS NULL',
+                    (guild_id,)
+                )
+                history_updated += cursor.rowcount
+                await conn.commit()
+
+    logger.info(
+        'Assigned all legacy data to guild %s (%d history records updated)',
+        guild_id, history_updated
+    )
+
+async def ensure_guild_ready(guild_id):
+    await init_active_db()
+    await assign_all_legacy_data_to_guild(guild_id)
+
+async def migrate_legacy_data():
+    await init_active_db()
+    await migrate_legacy_users_to_active_sessions()
+    await migrate_legacy_history_tables()
+
+async def fetch_active_session(conn, guild_id, user_id):
+    async with conn.execute('''
+        SELECT guild_id, start_time, is_on_break, break_start_time, total_break_duration
+        FROM active_sessions
+        WHERE user_id = ? AND (guild_id = ? OR guild_id = ?)
+        ORDER BY guild_id DESC
+    ''', (user_id, guild_id, LEGACY_GUILD_ID)) as cursor:
+        return await cursor.fetchone()
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
+    try:
+        await migrate_legacy_data()
+        print('旧DBの互換性チェック・移行が完了しました')
+    except Exception:
+        logger.exception('Failed to migrate legacy data')
     try:
         await bot.tree.sync()
         print('スラッシュコマンドを同期しました')
@@ -177,19 +348,15 @@ async def start(interaction: discord.Interaction):
             await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
-        await init_active_db()
+        await ensure_guild_ready(guild_id)
         user_id = interaction.user.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('BEGIN IMMEDIATE')
-            async with conn.execute(
-                'SELECT start_time, is_on_break FROM active_sessions WHERE guild_id = ? AND user_id = ?',
-                (guild_id, user_id)
-            ) as cursor:
-                result = await cursor.fetchone()
+            result = await fetch_active_session(conn, guild_id, user_id)
 
             if result:
                 await conn.rollback()
-                if result[1] == 1:
+                if result[2] == 1:
                     await interaction.response.send_message(
                         f'{interaction.user.mention} さん、休憩中のため出勤できません。まずは /restart コマンドで休憩を終了してください。'
                     )
@@ -216,13 +383,15 @@ async def start(interaction: discord.Interaction):
         else:
             await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
 
-async def save_work_history(guild_id, user_id, start_time, end_time, breaks):
+async def save_work_history(guild_id, user_id, start_time, end_time, breaks, legacy_break_total=0):
     try:
         start_date = datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S').date()
         end_date = datetime.datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S').date()
         start_dt = datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
         end_dt = datetime.datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
         total_break = calculate_break_in_range(start_dt, end_dt, breaks)
+        if total_break == 0 and legacy_break_total > 0:
+            total_break = legacy_break_total
 
         if start_date.year != end_date.year or start_date.month != end_date.month:
             end_of_start_month = end_of_month(start_date)
@@ -230,6 +399,8 @@ async def save_work_history(guild_id, user_id, start_time, end_time, breaks):
 
             break_first = calculate_break_in_range(start_dt, end_of_start_month, breaks)
             break_second = calculate_break_in_range(start_of_end_month, end_dt, breaks)
+            if break_first + break_second == 0 and legacy_break_total > 0:
+                break_first = legacy_break_total
             work_duration_first_month = max(0, (end_of_start_month - start_dt).total_seconds() - break_first)
             work_duration_second_month = max(0, (end_dt - start_of_end_month).total_seconds() - break_second)
             table_name_first_month, db_path_first_month = await get_monthly_table_for_date(start_date)
@@ -269,16 +440,12 @@ async def end(interaction: discord.Interaction):
             await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
-        await init_active_db()
+        await ensure_guild_ready(guild_id)
         user_id = interaction.user.id
 
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('BEGIN IMMEDIATE')
-            async with conn.execute(
-                'SELECT start_time, is_on_break FROM active_sessions WHERE guild_id = ? AND user_id = ?',
-                (guild_id, user_id)
-            ) as cursor:
-                result = await cursor.fetchone()
+            result = await fetch_active_session(conn, guild_id, user_id)
 
             if not result:
                 await conn.rollback()
@@ -287,24 +454,33 @@ async def end(interaction: discord.Interaction):
                 )
                 return
 
-            if result[1] == 1:
+            if result[2] == 1:
                 await conn.rollback()
                 await interaction.response.send_message(
                     f'{interaction.user.mention} さん、休憩中のため退勤できません。まずは /restart コマンドで休憩を終了してください。'
                 )
                 return
 
-            session_start_str = result[0]
+            session_start_str = result[1]
+            legacy_break_total = result[4] or 0
             start_time = datetime.datetime.strptime(session_start_str, '%Y-%m-%d %H:%M:%S')
             end_time = datetime.datetime.now()
             breaks = await get_session_breaks(guild_id, user_id, session_start_str)
             break_total = calculate_break_in_range(start_time, end_time, breaks)
+            if break_total == 0 and legacy_break_total > 0:
+                break_total = legacy_break_total
             work_duration = max(0, (end_time - start_time).total_seconds() - break_total)
 
-            await conn.execute('DELETE FROM active_sessions WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
+            await conn.execute(
+                'DELETE FROM active_sessions WHERE user_id = ? AND (guild_id = ? OR guild_id = ?)',
+                (user_id, guild_id, LEGACY_GUILD_ID)
+            )
             await conn.commit()
 
-        await save_work_history(guild_id, user_id, session_start_str, end_time.strftime('%Y-%m-%d %H:%M:%S'), breaks)
+        await save_work_history(
+            guild_id, user_id, session_start_str,
+            end_time.strftime('%Y-%m-%d %H:%M:%S'), breaks, legacy_break_total
+        )
         await delete_session_breaks(guild_id, user_id, session_start_str)
 
         hours, remainder = divmod(work_duration, 3600)
@@ -327,22 +503,18 @@ async def break_(interaction: discord.Interaction):
             await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
-        await init_active_db()
+        await ensure_guild_ready(guild_id)
         user_id = interaction.user.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('BEGIN IMMEDIATE')
-            async with conn.execute(
-                'SELECT start_time, is_on_break FROM active_sessions WHERE guild_id = ? AND user_id = ?',
-                (guild_id, user_id)
-            ) as cursor:
-                result = await cursor.fetchone()
+            result = await fetch_active_session(conn, guild_id, user_id)
 
-            if not result or result[0] is None:
+            if not result or result[1] is None:
                 await conn.rollback()
                 await interaction.response.send_message(
                     f'{interaction.user.mention} さん、まずは /start で出勤してください。'
                 )
-            elif result[1] == 1:
+            elif result[2] == 1:
                 await conn.rollback()
                 await interaction.response.send_message(
                     f'{interaction.user.mention} さんは既に休憩中です。'
@@ -350,8 +522,8 @@ async def break_(interaction: discord.Interaction):
             else:
                 break_start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 await conn.execute(
-                    'UPDATE active_sessions SET is_on_break = 1, break_start_time = ? WHERE guild_id = ? AND user_id = ?',
-                    (break_start_time, guild_id, user_id)
+                    'UPDATE active_sessions SET is_on_break = 1, break_start_time = ? WHERE user_id = ? AND (guild_id = ? OR guild_id = ?)',
+                    (break_start_time, user_id, guild_id, LEGACY_GUILD_ID)
                 )
                 await conn.execute(
                     'INSERT INTO break_records (guild_id, user_id, break_start) VALUES (?, ?, ?)',
@@ -376,17 +548,13 @@ async def restart(interaction: discord.Interaction):
             await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
-        await init_active_db()
+        await ensure_guild_ready(guild_id)
         user_id = interaction.user.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('BEGIN IMMEDIATE')
-            async with conn.execute(
-                'SELECT break_start_time FROM active_sessions WHERE guild_id = ? AND user_id = ? AND is_on_break = 1',
-                (guild_id, user_id)
-            ) as cursor:
-                result = await cursor.fetchone()
+            result = await fetch_active_session(conn, guild_id, user_id)
 
-            if not result:
+            if not result or result[2] != 1:
                 await conn.rollback()
                 await interaction.response.send_message(
                     f'{interaction.user.mention} さん、休憩中ではありません。/break で休憩を開始してください。'
@@ -396,16 +564,16 @@ async def restart(interaction: discord.Interaction):
                 break_end_time = break_end.strftime('%Y-%m-%d %H:%M:%S')
                 await conn.execute('''
                     UPDATE active_sessions SET is_on_break = 0
-                    WHERE guild_id = ? AND user_id = ?
-                ''', (guild_id, user_id))
+                    WHERE user_id = ? AND (guild_id = ? OR guild_id = ?)
+                ''', (user_id, guild_id, LEGACY_GUILD_ID))
                 await conn.execute('''
                     UPDATE break_records SET break_end = ?
                     WHERE id = (
                         SELECT id FROM break_records
-                        WHERE guild_id = ? AND user_id = ? AND break_end IS NULL
+                        WHERE user_id = ? AND (guild_id = ? OR guild_id = ?) AND break_end IS NULL
                         ORDER BY id DESC LIMIT 1
                     )
-                ''', (break_end_time, guild_id, user_id))
+                ''', (break_end_time, user_id, guild_id, LEGACY_GUILD_ID))
                 await conn.commit()
                 await interaction.response.send_message(
                     f'{interaction.user.mention} さん、{break_end.strftime("%H:%M")} に休憩を終了しました。'
@@ -425,14 +593,16 @@ async def monthly(interaction: discord.Interaction):
             await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
+        await ensure_guild_ready(guild_id)
+
         user_id = interaction.user.id
         db_path = get_db_path()
         table_name = await get_monthly_table()
         async with aiosqlite.connect(db_path) as conn:
             async with conn.execute(f'''
                 SELECT SUM(work_duration) FROM {table_name}
-                WHERE guild_id = ? AND user_id = ?
-            ''', (guild_id, user_id)) as cursor:
+                WHERE user_id = ? AND guild_id = ?
+            ''', (user_id, guild_id)) as cursor:
                 row = await cursor.fetchone()
                 total_seconds = row[0]
 
@@ -461,6 +631,8 @@ async def last_monthly(interaction: discord.Interaction):
             await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
             return
 
+        await ensure_guild_ready(guild_id)
+
         user_id = interaction.user.id
         table_name = f"history_{get_month_key(month_offset=-1)}"
         db_path = get_db_path(month_offset=-1)
@@ -486,8 +658,8 @@ async def last_monthly(interaction: discord.Interaction):
 
             async with conn.execute(f'''
                 SELECT SUM(work_duration) FROM {table_name}
-                WHERE guild_id = ? AND user_id = ?
-            ''', (guild_id, user_id)) as cursor:
+                WHERE user_id = ? AND guild_id = ?
+            ''', (user_id, guild_id)) as cursor:
                 row = await cursor.fetchone()
                 total_seconds = row[0]
 

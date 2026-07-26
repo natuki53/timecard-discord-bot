@@ -1,0 +1,14 @@
+[Unit]
+Description=Timecard Discord Bot auto-deploy
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=DEPLOY_DIR=/home/natuki/services/discord-bots/timecard-discord-bot
+ExecStart=/home/natuki/services/discord-bots/timecard-discord-bot/scripts/deploy.sh
+User=natuki
+Group=natuki
+
+[Install]
+WantedBy=multi-user.target

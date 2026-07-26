@@ -66,6 +66,27 @@ pause
 
 ※`cd /d`のパス部分は、自分のBotのフォルダパスに合わせてください。
 
+### Docker で実行（サーバー向け）
+
+```bash
+cp .env.example .env   # 初回のみ。トークン等を編集
+docker compose up -d --build
+```
+
+`db/` フォルダは Git 管理外です。コンテナ再作成・自動デプロイでも DB データは保持されます。
+
+### 自動デプロイ（master 更新時）
+
+サーバーでは 5 分ごとに GitHub の master を確認し、更新があれば再ビルド・再起動します。
+
+```bash
+sudo cp deploy/timecard-deploy.service deploy/timecard-deploy.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now timecard-deploy.timer
+```
+
+手動デプロイ: `./scripts/deploy.sh`
+
 ---
 
 ## 💾 データ管理
@@ -73,6 +94,8 @@ pause
 - 勤務データは **月ごとの SQLite データベースファイル** に保存されます。
 - 出勤中の状態は `active_sessions.db` に保存されます（月をまたいでも退勤可能）。
 - 出勤・退勤・休憩はサーバーID + ユーザーIDごとに管理されます。
+- **旧バージョンのDB**（`users` テーブル・`guild_id` なし履歴）も起動時に自動移行されます。
+- 初回コマンド実行時、旧データは**そのサーバーのIDに一括紐付け**されます（1サーバー運用向け）。
 - データは `DB_DIR` で指定したフォルダ内に `work_tracking_YYYY_MM.db` として保存されます。
 - 月ごとの勤務履歴はテーブル名 `history_YYYY_MM` に記録されます。
 
