@@ -23,6 +23,11 @@ validate_config()
 
 ACTIVE_DB_PATH = os.path.join(DB_DIR, 'active_sessions.db')
 
+def require_guild(ctx):
+    if ctx.guild is None:
+        return None
+    return ctx.guild.id
+
 # Intentsを設定
 intents = discord.Intents.default()
 intents.message_content = True
@@ -75,6 +80,7 @@ def get_monthly_table_for_date(dt):
         c.execute(f'''
             CREATE TABLE IF NOT EXISTS {table_name} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER,
                 user_id INTEGER,
                 start_time TEXT,
                 end_time TEXT,
@@ -96,11 +102,13 @@ def init_active_db():
         c = conn.cursor()
         c.execute('''
             CREATE TABLE IF NOT EXISTS active_sessions (
-                user_id INTEGER PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
                 start_time TEXT,
                 is_on_break INTEGER,
                 break_start_time TEXT,
-                total_break_duration REAL
+                total_break_duration REAL,
+                PRIMARY KEY (guild_id, user_id)
             )
         ''')
         conn.commit()
@@ -114,6 +122,7 @@ def get_monthly_table(month_offset=0):
         c.execute(f'''
             CREATE TABLE IF NOT EXISTS {table_name} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER,
                 user_id INTEGER,
                 start_time TEXT,
                 end_time TEXT,
@@ -135,15 +144,15 @@ async def on_ready():
         print(f"スラッシュコマンドの同期中にエラーが発生しました: {e}")
 
 # 出勤データを保存
-def save_start_time(user_id, start_time):
+def save_start_time(guild_id, user_id, start_time):
     try:
         init_active_db()
         with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
             c.execute('''
-                INSERT OR REPLACE INTO active_sessions (user_id, start_time, is_on_break, total_break_duration)
-                VALUES (?, ?, 0, 0)
-            ''', (user_id, start_time))
+                INSERT OR REPLACE INTO active_sessions (guild_id, user_id, start_time, is_on_break, total_break_duration)
+                VALUES (?, ?, ?, 0, 0)
+            ''', (guild_id, user_id, start_time))
             conn.commit()
     except Exception as e:
         print(f"Error saving start time: {e}")
@@ -152,11 +161,16 @@ def save_start_time(user_id, start_time):
 @bot.slash_command(name="start", description="出勤時に使うコマンド。出勤時間を記録します。")
 async def start(ctx):
     try:
+        guild_id = require_guild(ctx)
+        if guild_id is None:
+            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            return
+
         init_active_db()
         user_id = ctx.author.id
         with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
-            c.execute('SELECT start_time, is_on_break FROM active_sessions WHERE user_id = ?', (user_id,))
+            c.execute('SELECT start_time, is_on_break FROM active_sessions WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
             result = c.fetchone()
             
             if result:
@@ -168,9 +182,9 @@ async def start(ctx):
 
             start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             c.execute('''
-                INSERT INTO active_sessions (user_id, start_time, is_on_break, total_break_duration)
-                VALUES (?, ?, 0, 0)
-            ''', (user_id, start_time))
+                INSERT INTO active_sessions (guild_id, user_id, start_time, is_on_break, total_break_duration)
+                VALUES (?, ?, ?, 0, 0)
+            ''', (guild_id, user_id, start_time))
             conn.commit()
             
         await ctx.respond(f"{ctx.author.mention} さん、{start_time} に出勤しました。")
@@ -178,7 +192,7 @@ async def start(ctx):
         await ctx.respond(f"エラーが発生しました: {e}")
 
 # 退勤データを保存（動的な月テーブルに記録）
-def save_work_history(user_id, start_time, end_time, break_duration, work_duration):
+def save_work_history(guild_id, user_id, start_time, end_time, break_duration, work_duration):
     try:
         start_date = datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S').date()
         end_date = datetime.datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S').date()
@@ -202,17 +216,17 @@ def save_work_history(user_id, start_time, end_time, break_duration, work_durati
             with sqlite3.connect(db_path_first_month) as conn:
                 c = conn.cursor()
                 c.execute(f'''
-                    INSERT INTO {table_name_first_month} (user_id, start_time, end_time, total_break_duration, work_duration)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (user_id, start_time, end_of_start_month.strftime('%Y-%m-%d %H:%M:%S'), break_duration, work_duration_first_month))
+                    INSERT INTO {table_name_first_month} (guild_id, user_id, start_time, end_time, total_break_duration, work_duration)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (guild_id, user_id, start_time, end_of_start_month.strftime('%Y-%m-%d %H:%M:%S'), break_duration, work_duration_first_month))
                 conn.commit()
 
             with sqlite3.connect(db_path_second_month) as conn:
                 c = conn.cursor()
                 c.execute(f'''
-                    INSERT INTO {table_name_second_month} (user_id, start_time, end_time, total_break_duration, work_duration)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (user_id, start_of_end_month.strftime('%Y-%m-%d %H:%M:%S'), end_time, 0, work_duration_second_month))
+                    INSERT INTO {table_name_second_month} (guild_id, user_id, start_time, end_time, total_break_duration, work_duration)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (guild_id, user_id, start_of_end_month.strftime('%Y-%m-%d %H:%M:%S'), end_time, 0, work_duration_second_month))
                 conn.commit()
         else:
             # 同じ月の場合
@@ -221,9 +235,9 @@ def save_work_history(user_id, start_time, end_time, break_duration, work_durati
             with sqlite3.connect(db_path) as conn:
                 c = conn.cursor()
                 c.execute(f'''
-                    INSERT INTO {table_name} (user_id, start_time, end_time, total_break_duration, work_duration)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (user_id, start_time, end_time, break_duration, work_duration))
+                    INSERT INTO {table_name} (guild_id, user_id, start_time, end_time, total_break_duration, work_duration)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (guild_id, user_id, start_time, end_time, break_duration, work_duration))
                 conn.commit()
     except Exception as e:
         print(f"Error saving work history: {e}")
@@ -232,12 +246,17 @@ def save_work_history(user_id, start_time, end_time, break_duration, work_durati
 @bot.slash_command(name="end", description="退勤時に使うコマンド。退勤時間を記録し、勤務時間を表示します。")
 async def end(ctx):
     try:
+        guild_id = require_guild(ctx)
+        if guild_id is None:
+            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            return
+
         init_active_db()
         user_id = ctx.author.id
         
         with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
-            c.execute('SELECT start_time, total_break_duration, is_on_break FROM active_sessions WHERE user_id = ?', (user_id,))
+            c.execute('SELECT start_time, total_break_duration, is_on_break FROM active_sessions WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
             result = c.fetchone()
             
             # 出勤記録がない場合
@@ -256,10 +275,9 @@ async def end(ctx):
             work_duration = (end_time - start_time).total_seconds() - result[1]
             
             # 勤務履歴を保存
-            save_work_history(user_id, result[0], end_time.strftime('%Y-%m-%d %H:%M:%S'), result[1], work_duration)
+            save_work_history(guild_id, user_id, result[0], end_time.strftime('%Y-%m-%d %H:%M:%S'), result[1], work_duration)
             
-            # ユーザーデータを削除
-            c.execute('DELETE FROM active_sessions WHERE user_id = ?', (user_id,))
+            c.execute('DELETE FROM active_sessions WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
             conn.commit()
             
             # 結果を表示
@@ -271,12 +289,12 @@ async def end(ctx):
         await ctx.respond(f"エラーが発生しました: {e}")
 
 # 休憩開始のデータを保存
-def save_break_time(user_id, break_start_time):
+def save_break_time(guild_id, user_id, break_start_time):
     try:
         init_active_db()
         with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
-            c.execute('UPDATE active_sessions SET is_on_break = 1, break_start_time = ? WHERE user_id = ?', (break_start_time, user_id))
+            c.execute('UPDATE active_sessions SET is_on_break = 1, break_start_time = ? WHERE guild_id = ? AND user_id = ?', (break_start_time, guild_id, user_id))
             conn.commit()
     except Exception as e:
         print(f"Error saving break time: {e}")
@@ -285,11 +303,16 @@ def save_break_time(user_id, break_start_time):
 @bot.slash_command(name="break", description="休憩を開始するコマンド。休憩時間を記録します。")
 async def break_(ctx):
     try:
+        guild_id = require_guild(ctx)
+        if guild_id is None:
+            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            return
+
         init_active_db()
         user_id = ctx.author.id
         with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
-            c.execute('SELECT start_time, is_on_break FROM active_sessions WHERE user_id = ?', (user_id,))
+            c.execute('SELECT start_time, is_on_break FROM active_sessions WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
             result = c.fetchone()
 
         if not result or result[0] is None:
@@ -298,13 +321,13 @@ async def break_(ctx):
             await ctx.respond(f"{ctx.author.mention} さんは既に休憩中です。")
         else:
             break_start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            save_break_time(user_id, break_start_time)
+            save_break_time(guild_id, user_id, break_start_time)
             await ctx.respond(f"{ctx.author.mention} さん、{break_start_time} に休憩を開始しました。")
     except Exception as e:
         await ctx.respond(f"エラーが発生しました: {e}")
 
 # 休憩終了時に休憩時間を更新
-def update_break_duration(user_id, break_duration):
+def update_break_duration(guild_id, user_id, break_duration):
     try:
         init_active_db()
         with sqlite3.connect(ACTIVE_DB_PATH) as conn:
@@ -312,8 +335,8 @@ def update_break_duration(user_id, break_duration):
             c.execute('''
                 UPDATE active_sessions
                 SET total_break_duration = total_break_duration + ?, is_on_break = 0
-                WHERE user_id = ?
-            ''', (break_duration, user_id))
+                WHERE guild_id = ? AND user_id = ?
+            ''', (break_duration, guild_id, user_id))
             conn.commit()
     except Exception as e:
         print(f"Error updating break duration: {e}")
@@ -322,11 +345,16 @@ def update_break_duration(user_id, break_duration):
 @bot.slash_command(name="restart", description="休憩を終了するコマンド。累積休憩時間に休憩時間を追加します。")
 async def restart(ctx):
     try:
+        guild_id = require_guild(ctx)
+        if guild_id is None:
+            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            return
+
         init_active_db()
         user_id = ctx.author.id
         with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
-            c.execute('SELECT break_start_time FROM active_sessions WHERE user_id = ? AND is_on_break = 1', (user_id,))
+            c.execute('SELECT break_start_time FROM active_sessions WHERE guild_id = ? AND user_id = ? AND is_on_break = 1', (guild_id, user_id))
             result = c.fetchone()
 
         if not result:
@@ -335,7 +363,7 @@ async def restart(ctx):
             break_start = datetime.datetime.strptime(result[0], '%Y-%m-%d %H:%M:%S')
             break_end = datetime.datetime.now()
             break_duration = (break_end - break_start).total_seconds()
-            update_break_duration(user_id, break_duration)
+            update_break_duration(guild_id, user_id, break_duration)
             await ctx.respond(f"{ctx.author.mention} さん、{break_end.strftime('%H:%M')} に休憩を終了しました。")
     except Exception as e:
         await ctx.respond(f"エラーが発生しました: {e}")
@@ -344,6 +372,11 @@ async def restart(ctx):
 @bot.slash_command(name="monthly", description="今月の合計勤務時間を表示するコマンドです。")
 async def monthly(ctx):
     try:
+        guild_id = require_guild(ctx)
+        if guild_id is None:
+            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            return
+
         user_id = ctx.author.id
         db_path = get_db_path()
         table_name = get_monthly_table()
@@ -351,8 +384,8 @@ async def monthly(ctx):
             c = conn.cursor()
             c.execute(f'''
                 SELECT SUM(work_duration) FROM {table_name}
-                WHERE user_id = ?
-            ''', (user_id,))
+                WHERE guild_id = ? AND user_id = ?
+            ''', (guild_id, user_id))
             total_seconds = c.fetchone()[0]
 
         if total_seconds:
@@ -368,6 +401,11 @@ async def monthly(ctx):
 @bot.slash_command(name="last_monthly", description="先月の合計勤務時間を表示するコマンドです。")
 async def last_monthly(ctx):
     try:
+        guild_id = require_guild(ctx)
+        if guild_id is None:
+            await ctx.respond("このコマンドはサーバー内でのみ使用できます。")
+            return
+
         user_id = ctx.author.id
         table_name = f"history_{get_month_key(month_offset=-1)}"
         db_path = get_db_path(month_offset=-1)
@@ -390,8 +428,8 @@ async def last_monthly(ctx):
             # 先月の勤務時間の合計を取得
             c.execute(f'''
                 SELECT SUM(work_duration) FROM {table_name}
-                WHERE user_id = ?
-            ''', (user_id,))
+                WHERE guild_id = ? AND user_id = ?
+            ''', (guild_id, user_id))
             total_seconds = c.fetchone()[0]
         
         # 結果を表示
