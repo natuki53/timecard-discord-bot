@@ -72,6 +72,19 @@ def start_of_month(dt):
 def get_db_path_for_date(dt):
     return os.path.join(DB_DIR, f'work_tracking_{get_month_key_from_date(dt)}.db')
 
+def overlap_seconds(range_start, range_end, break_start, break_end):
+    overlap_start = max(range_start, break_start)
+    overlap_end = min(range_end, break_end)
+    if overlap_start >= overlap_end:
+        return 0
+    return (overlap_end - overlap_start).total_seconds()
+
+def calculate_break_in_range(range_start, range_end, breaks):
+    return sum(
+        overlap_seconds(range_start, range_end, break_start, break_end)
+        for break_start, break_end in breaks
+    )
+
 HISTORY_TABLE_SCHEMA = '''
     CREATE TABLE IF NOT EXISTS {table_name} (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,6 +124,38 @@ async def init_active_db():
                 PRIMARY KEY (guild_id, user_id)
             )
         ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS break_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                break_start TEXT NOT NULL,
+                break_end TEXT
+            )
+        ''')
+        await conn.commit()
+
+async def get_session_breaks(guild_id, user_id, session_start):
+    async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
+        async with conn.execute('''
+            SELECT break_start, break_end FROM break_records
+            WHERE guild_id = ? AND user_id = ? AND break_start >= ? AND break_end IS NOT NULL
+        ''', (guild_id, user_id, session_start)) as cursor:
+            rows = await cursor.fetchall()
+    breaks = []
+    for break_start_str, break_end_str in rows:
+        breaks.append((
+            datetime.datetime.strptime(break_start_str, '%Y-%m-%d %H:%M:%S'),
+            datetime.datetime.strptime(break_end_str, '%Y-%m-%d %H:%M:%S'),
+        ))
+    return breaks
+
+async def delete_session_breaks(guild_id, user_id, session_start):
+    async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
+        await conn.execute('''
+            DELETE FROM break_records
+            WHERE guild_id = ? AND user_id = ? AND break_start >= ?
+        ''', (guild_id, user_id, session_start))
         await conn.commit()
 
 # 月ごとのテーブルを動的に作成する関数
@@ -182,45 +227,47 @@ async def start(ctx):
         await ctx.respond(f"エラーが発生しました: {e}")
 
 # 退勤データを保存（動的な月テーブルに記録）
-async def save_work_history(guild_id, user_id, start_time, end_time, break_duration, work_duration):
+async def save_work_history(guild_id, user_id, start_time, end_time, breaks):
     try:
         start_date = datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S').date()
         end_date = datetime.datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S').date()
+        start_dt = datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
+        end_dt = datetime.datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
+        total_break = calculate_break_in_range(start_dt, end_dt, breaks)
 
         if start_date.year != end_date.year or start_date.month != end_date.month:
             end_of_start_month = end_of_month(start_date)
             start_of_end_month = start_of_month(end_date)
 
-            start_dt = datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
-            end_dt = datetime.datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
-
-            work_duration_first_month = (end_of_start_month - start_dt).total_seconds() - break_duration
+            break_first = calculate_break_in_range(start_dt, end_of_start_month, breaks)
+            break_second = calculate_break_in_range(start_of_end_month, end_dt, breaks)
+            work_duration_first_month = (end_of_start_month - start_dt).total_seconds() - break_first
+            work_duration_second_month = (end_dt - start_of_end_month).total_seconds() - break_second
             table_name_first_month, db_path_first_month = await get_monthly_table_for_date(start_date)
-
-            work_duration_second_month = (end_dt - start_of_end_month).total_seconds()
             table_name_second_month, db_path_second_month = await get_monthly_table_for_date(end_date)
 
             async with aiosqlite.connect(db_path_first_month) as conn:
                 await conn.execute(f'''
                     INSERT INTO {table_name_first_month} (guild_id, user_id, start_time, end_time, total_break_duration, work_duration)
                     VALUES (?, ?, ?, ?, ?, ?)
-                ''', (guild_id, user_id, start_time, end_of_start_month.strftime('%Y-%m-%d %H:%M:%S'), break_duration, work_duration_first_month))
+                ''', (guild_id, user_id, start_time, end_of_start_month.strftime('%Y-%m-%d %H:%M:%S'), break_first, work_duration_first_month))
                 await conn.commit()
 
             async with aiosqlite.connect(db_path_second_month) as conn:
                 await conn.execute(f'''
                     INSERT INTO {table_name_second_month} (guild_id, user_id, start_time, end_time, total_break_duration, work_duration)
                     VALUES (?, ?, ?, ?, ?, ?)
-                ''', (guild_id, user_id, start_of_end_month.strftime('%Y-%m-%d %H:%M:%S'), end_time, 0, work_duration_second_month))
+                ''', (guild_id, user_id, start_of_end_month.strftime('%Y-%m-%d %H:%M:%S'), end_time, break_second, work_duration_second_month))
                 await conn.commit()
         else:
+            work_duration = (end_dt - start_dt).total_seconds() - total_break
             table_name = await get_monthly_table()
             db_path = get_db_path()
             async with aiosqlite.connect(db_path) as conn:
                 await conn.execute(f'''
                     INSERT INTO {table_name} (guild_id, user_id, start_time, end_time, total_break_duration, work_duration)
                     VALUES (?, ?, ?, ?, ?, ?)
-                ''', (guild_id, user_id, start_time, end_time, break_duration, work_duration))
+                ''', (guild_id, user_id, start_time, end_time, total_break, work_duration))
                 await conn.commit()
     except Exception as e:
         print(f"Error saving work history: {e}")
@@ -239,7 +286,7 @@ async def end(ctx):
 
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             async with conn.execute(
-                'SELECT start_time, total_break_duration, is_on_break FROM active_sessions WHERE guild_id = ? AND user_id = ?',
+                'SELECT start_time, is_on_break FROM active_sessions WHERE guild_id = ? AND user_id = ?',
                 (guild_id, user_id)
             ) as cursor:
                 result = await cursor.fetchone()
@@ -248,15 +295,19 @@ async def end(ctx):
                 await ctx.respond(f"{ctx.author.mention} さん、まだ出勤していません。/start を使用してください。")
                 return
 
-            if result[2] == 1:
+            if result[1] == 1:
                 await ctx.respond(f"{ctx.author.mention} さん、休憩中のため退勤できません。まずは /restart コマンドで休憩を終了してください。")
                 return
 
-            start_time = datetime.datetime.strptime(result[0], '%Y-%m-%d %H:%M:%S')
+            session_start_str = result[0]
+            start_time = datetime.datetime.strptime(session_start_str, '%Y-%m-%d %H:%M:%S')
             end_time = datetime.datetime.now()
-            work_duration = (end_time - start_time).total_seconds() - result[1]
+            breaks = await get_session_breaks(guild_id, user_id, session_start_str)
+            break_total = calculate_break_in_range(start_time, end_time, breaks)
+            work_duration = (end_time - start_time).total_seconds() - break_total
 
-            await save_work_history(guild_id, user_id, result[0], end_time.strftime('%Y-%m-%d %H:%M:%S'), result[1], work_duration)
+            await save_work_history(guild_id, user_id, session_start_str, end_time.strftime('%Y-%m-%d %H:%M:%S'), breaks)
+            await delete_session_breaks(guild_id, user_id, session_start_str)
 
             await conn.execute('DELETE FROM active_sessions WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
             await conn.commit()
@@ -276,6 +327,10 @@ async def save_break_time(guild_id, user_id, break_start_time):
             await conn.execute(
                 'UPDATE active_sessions SET is_on_break = 1, break_start_time = ? WHERE guild_id = ? AND user_id = ?',
                 (break_start_time, guild_id, user_id)
+            )
+            await conn.execute(
+                'INSERT INTO break_records (guild_id, user_id, break_start) VALUES (?, ?, ?)',
+                (guild_id, user_id, break_start_time)
             )
             await conn.commit()
     except Exception as e:
@@ -311,15 +366,24 @@ async def break_(ctx):
         await ctx.respond(f"エラーが発生しました: {e}")
 
 # 休憩終了時に休憩時間を更新
-async def update_break_duration(guild_id, user_id, break_duration):
+async def finish_break(guild_id, user_id, break_end_time):
     try:
         await init_active_db()
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('''
                 UPDATE active_sessions
-                SET total_break_duration = total_break_duration + ?, is_on_break = 0
+                SET is_on_break = 0
                 WHERE guild_id = ? AND user_id = ?
-            ''', (break_duration, guild_id, user_id))
+            ''', (guild_id, user_id))
+            await conn.execute('''
+                UPDATE break_records
+                SET break_end = ?
+                WHERE id = (
+                    SELECT id FROM break_records
+                    WHERE guild_id = ? AND user_id = ? AND break_end IS NULL
+                    ORDER BY id DESC LIMIT 1
+                )
+            ''', (break_end_time, guild_id, user_id))
             await conn.commit()
     except Exception as e:
         print(f"Error updating break duration: {e}")
@@ -345,10 +409,9 @@ async def restart(ctx):
         if not result:
             await ctx.respond(f"{ctx.author.mention} さん、休憩中ではありません。/break で休憩を開始してください。")
         else:
-            break_start = datetime.datetime.strptime(result[0], '%Y-%m-%d %H:%M:%S')
             break_end = datetime.datetime.now()
-            break_duration = (break_end - break_start).total_seconds()
-            await update_break_duration(guild_id, user_id, break_duration)
+            break_end_time = break_end.strftime('%Y-%m-%d %H:%M:%S')
+            await finish_break(guild_id, user_id, break_end_time)
             await ctx.respond(f"{ctx.author.mention} さん、{break_end.strftime('%H:%M')} に休憩を終了しました。")
     except Exception as e:
         await ctx.respond(f"エラーが発生しました: {e}")
