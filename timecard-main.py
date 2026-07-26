@@ -202,6 +202,7 @@ async def start(ctx):
         await init_active_db()
         user_id = ctx.author.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
+            await conn.execute('BEGIN IMMEDIATE')
             async with conn.execute(
                 'SELECT start_time, is_on_break FROM active_sessions WHERE guild_id = ? AND user_id = ?',
                 (guild_id, user_id)
@@ -209,6 +210,7 @@ async def start(ctx):
                 result = await cursor.fetchone()
 
             if result:
+                await conn.rollback()
                 if result[1] == 1:
                     await ctx.respond(f"{ctx.author.mention} さん、休憩中のため出勤できません。まずは /restart コマンドで休憩を終了してください。")
                 else:
@@ -285,6 +287,7 @@ async def end(ctx):
         user_id = ctx.author.id
 
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
+            await conn.execute('BEGIN IMMEDIATE')
             async with conn.execute(
                 'SELECT start_time, is_on_break FROM active_sessions WHERE guild_id = ? AND user_id = ?',
                 (guild_id, user_id)
@@ -292,10 +295,12 @@ async def end(ctx):
                 result = await cursor.fetchone()
 
             if not result:
+                await conn.rollback()
                 await ctx.respond(f"{ctx.author.mention} さん、まだ出勤していません。/start を使用してください。")
                 return
 
             if result[1] == 1:
+                await conn.rollback()
                 await ctx.respond(f"{ctx.author.mention} さん、休憩中のため退勤できません。まずは /restart コマンドで休憩を終了してください。")
                 return
 
@@ -306,11 +311,11 @@ async def end(ctx):
             break_total = calculate_break_in_range(start_time, end_time, breaks)
             work_duration = (end_time - start_time).total_seconds() - break_total
 
-            await save_work_history(guild_id, user_id, session_start_str, end_time.strftime('%Y-%m-%d %H:%M:%S'), breaks)
-            await delete_session_breaks(guild_id, user_id, session_start_str)
-
             await conn.execute('DELETE FROM active_sessions WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
             await conn.commit()
+
+        await save_work_history(guild_id, user_id, session_start_str, end_time.strftime('%Y-%m-%d %H:%M:%S'), breaks)
+        await delete_session_breaks(guild_id, user_id, session_start_str)
 
             hours, remainder = divmod(work_duration, 3600)
             minutes = remainder // 60
@@ -348,20 +353,31 @@ async def break_(ctx):
         await init_active_db()
         user_id = ctx.author.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
+            await conn.execute('BEGIN IMMEDIATE')
             async with conn.execute(
                 'SELECT start_time, is_on_break FROM active_sessions WHERE guild_id = ? AND user_id = ?',
                 (guild_id, user_id)
             ) as cursor:
                 result = await cursor.fetchone()
 
-        if not result or result[0] is None:
-            await ctx.respond(f"{ctx.author.mention} さん、まずは /start で出勤してください。")
-        elif result[1] == 1:
-            await ctx.respond(f"{ctx.author.mention} さんは既に休憩中です。")
-        else:
-            break_start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            await save_break_time(guild_id, user_id, break_start_time)
-            await ctx.respond(f"{ctx.author.mention} さん、{break_start_time} に休憩を開始しました。")
+            if not result or result[0] is None:
+                await conn.rollback()
+                await ctx.respond(f"{ctx.author.mention} さん、まずは /start で出勤してください。")
+            elif result[1] == 1:
+                await conn.rollback()
+                await ctx.respond(f"{ctx.author.mention} さんは既に休憩中です。")
+            else:
+                break_start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                await conn.execute(
+                    'UPDATE active_sessions SET is_on_break = 1, break_start_time = ? WHERE guild_id = ? AND user_id = ?',
+                    (break_start_time, guild_id, user_id)
+                )
+                await conn.execute(
+                    'INSERT INTO break_records (guild_id, user_id, break_start) VALUES (?, ?, ?)',
+                    (guild_id, user_id, break_start_time)
+                )
+                await conn.commit()
+                await ctx.respond(f"{ctx.author.mention} さん、{break_start_time} に休憩を開始しました。")
     except Exception as e:
         await ctx.respond(f"エラーが発生しました: {e}")
 
@@ -400,19 +416,33 @@ async def restart(ctx):
         await init_active_db()
         user_id = ctx.author.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
+            await conn.execute('BEGIN IMMEDIATE')
             async with conn.execute(
                 'SELECT break_start_time FROM active_sessions WHERE guild_id = ? AND user_id = ? AND is_on_break = 1',
                 (guild_id, user_id)
             ) as cursor:
                 result = await cursor.fetchone()
 
-        if not result:
-            await ctx.respond(f"{ctx.author.mention} さん、休憩中ではありません。/break で休憩を開始してください。")
-        else:
-            break_end = datetime.datetime.now()
-            break_end_time = break_end.strftime('%Y-%m-%d %H:%M:%S')
-            await finish_break(guild_id, user_id, break_end_time)
-            await ctx.respond(f"{ctx.author.mention} さん、{break_end.strftime('%H:%M')} に休憩を終了しました。")
+            if not result:
+                await conn.rollback()
+                await ctx.respond(f"{ctx.author.mention} さん、休憩中ではありません。/break で休憩を開始してください。")
+            else:
+                break_end = datetime.datetime.now()
+                break_end_time = break_end.strftime('%Y-%m-%d %H:%M:%S')
+                await conn.execute('''
+                    UPDATE active_sessions SET is_on_break = 0
+                    WHERE guild_id = ? AND user_id = ?
+                ''', (guild_id, user_id))
+                await conn.execute('''
+                    UPDATE break_records SET break_end = ?
+                    WHERE id = (
+                        SELECT id FROM break_records
+                        WHERE guild_id = ? AND user_id = ? AND break_end IS NULL
+                        ORDER BY id DESC LIMIT 1
+                    )
+                ''', (break_end_time, guild_id, user_id))
+                await conn.commit()
+                await ctx.respond(f"{ctx.author.mention} さん、{break_end.strftime('%H:%M')} に休憩を終了しました。")
     except Exception as e:
         await ctx.respond(f"エラーが発生しました: {e}")
 
