@@ -12,6 +12,15 @@ load_dotenv()
 DB_DIR = os.getenv('DB_DIR')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 
+def validate_config():
+    if not DB_DIR:
+        raise ValueError('DB_DIR 環境変数が設定されていません。.env ファイルを確認してください。')
+    if not DISCORD_TOKEN:
+        raise ValueError('DISCORD_TOKEN 環境変数が設定されていません。.env ファイルを確認してください。')
+    os.makedirs(DB_DIR, exist_ok=True)
+
+validate_config()
+
 # Intentsを設定
 intents = discord.Intents.default()
 intents.message_content = True
