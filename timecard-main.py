@@ -18,7 +18,7 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 _attendance_channel_id = os.getenv('ATTENDANCE_CHANNEL_ID')
 ATTENDANCE_CHANNEL_ID = int(_attendance_channel_id) if _attendance_channel_id else None
 PANEL_MESSAGE_SETTING_KEY = 'attendance_panel_message_id'
-PANEL_MESSAGE_CONTENT = '出退勤操作パネル — ボタンから操作できます。'
+PANEL_MESSAGE_CONTENT = '操作パネル'
 
 def validate_config():
     if not DB_DIR:
