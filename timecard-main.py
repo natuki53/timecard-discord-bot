@@ -175,19 +175,6 @@ async def on_ready():
     except Exception as e:
         print(f"スラッシュコマンドの同期中にエラーが発生しました: {e}")
 
-# 出勤データを保存
-async def save_start_time(guild_id, user_id, start_time):
-    try:
-        await init_active_db()
-        async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
-            await conn.execute('''
-                INSERT OR REPLACE INTO active_sessions (guild_id, user_id, start_time, is_on_break, total_break_duration)
-                VALUES (?, ?, ?, 0, 0)
-            ''', (guild_id, user_id, start_time))
-            await conn.commit()
-    except Exception as e:
-        print(f"Error saving start time: {e}")
-
 # 出勤コマンド
 @bot.slash_command(name="start", description="出勤時に使うコマンド。出勤時間を記録します。")
 async def start(ctx):
@@ -322,23 +309,6 @@ async def end(ctx):
     except Exception as e:
         await ctx.respond(f"エラーが発生しました: {e}")
 
-# 休憩開始のデータを保存
-async def save_break_time(guild_id, user_id, break_start_time):
-    try:
-        await init_active_db()
-        async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
-            await conn.execute(
-                'UPDATE active_sessions SET is_on_break = 1, break_start_time = ? WHERE guild_id = ? AND user_id = ?',
-                (break_start_time, guild_id, user_id)
-            )
-            await conn.execute(
-                'INSERT INTO break_records (guild_id, user_id, break_start) VALUES (?, ?, ?)',
-                (guild_id, user_id, break_start_time)
-            )
-            await conn.commit()
-    except Exception as e:
-        print(f"Error saving break time: {e}")
-
 # 休憩開始コマンド
 @bot.slash_command(name="break", description="休憩を開始するコマンド。休憩時間を記録します。")
 async def break_(ctx):
@@ -378,29 +348,6 @@ async def break_(ctx):
                 await ctx.respond(f"{ctx.author.mention} さん、{break_start_time} に休憩を開始しました。")
     except Exception as e:
         await ctx.respond(f"エラーが発生しました: {e}")
-
-# 休憩終了時に休憩時間を更新
-async def finish_break(guild_id, user_id, break_end_time):
-    try:
-        await init_active_db()
-        async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
-            await conn.execute('''
-                UPDATE active_sessions
-                SET is_on_break = 0
-                WHERE guild_id = ? AND user_id = ?
-            ''', (guild_id, user_id))
-            await conn.execute('''
-                UPDATE break_records
-                SET break_end = ?
-                WHERE id = (
-                    SELECT id FROM break_records
-                    WHERE guild_id = ? AND user_id = ? AND break_end IS NULL
-                    ORDER BY id DESC LIMIT 1
-                )
-            ''', (break_end_time, guild_id, user_id))
-            await conn.commit()
-    except Exception as e:
-        print(f"Error updating break duration: {e}")
 
 # 休憩終了コマンド
 @bot.slash_command(name="restart", description="休憩を終了するコマンド。累積休憩時間に休憩時間を追加します。")
