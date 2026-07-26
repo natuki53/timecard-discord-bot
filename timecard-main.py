@@ -21,10 +21,22 @@ intents.members = True
 # Botの初期化
 bot = discord.Bot(intents=intents)
 
+# 月オフセットから年・月キー（YYYY_MM）を取得する関数
+def get_month_key(month_offset=0):
+    today = datetime.datetime.now()
+    year = today.year
+    month = today.month + month_offset
+    while month > 12:
+        month -= 12
+        year += 1
+    while month < 1:
+        month += 12
+        year -= 1
+    return f'{year}_{month:02d}'
+
 # 年と月ごとにデータベースファイルのパスを取得する関数
 def get_db_path(month_offset=0):
-    current_month = (datetime.datetime.now() + datetime.timedelta(days=month_offset * 30)).strftime('%Y_%m')
-    db_path = os.path.join(DB_DIR, f'work_tracking_{current_month}.db')
+    db_path = os.path.join(DB_DIR, f'work_tracking_{get_month_key(month_offset)}.db')
     return db_path
 
 # データベースとテーブルの初期化関数
@@ -47,8 +59,7 @@ def init_db(month_offset=0):
 # 月ごとのテーブルを動的に作成する関数
 def get_monthly_table(month_offset=0):
     db_path = get_db_path(month_offset)
-    current_month = (datetime.datetime.now() + datetime.timedelta(days=month_offset * 30)).strftime('%Y_%m')
-    table_name = f"history_{current_month}"
+    table_name = f"history_{get_month_key(month_offset)}"
     with sqlite3.connect(db_path) as conn:
         c = conn.cursor()
         c.execute(f'''
