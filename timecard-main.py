@@ -21,6 +21,8 @@ def validate_config():
 
 validate_config()
 
+ACTIVE_DB_PATH = os.path.join(DB_DIR, 'active_sessions.db')
+
 # Intentsを設定
 intents = discord.Intents.default()
 intents.message_content = True
@@ -88,22 +90,20 @@ def get_db_path(month_offset=0):
     db_path = os.path.join(DB_DIR, f'work_tracking_{get_month_key(month_offset)}.db')
     return db_path
 
-# データベースとテーブルの初期化関数
-def init_db(month_offset=0):
-    db_path = get_db_path(month_offset)
-    if not os.path.exists(db_path):
-        with sqlite3.connect(db_path) as conn:
-            c = conn.cursor()
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY,
-                    start_time TEXT,
-                    is_on_break INTEGER,
-                    break_start_time TEXT,
-                    total_break_duration REAL
-                )
-            ''')
-            conn.commit()
+# 出勤中セッション用DBの初期化（月をまたいでも退勤可能）
+def init_active_db():
+    with sqlite3.connect(ACTIVE_DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS active_sessions (
+                user_id INTEGER PRIMARY KEY,
+                start_time TEXT,
+                is_on_break INTEGER,
+                break_start_time TEXT,
+                total_break_duration REAL
+            )
+        ''')
+        conn.commit()
 
 # 月ごとのテーブルを動的に作成する関数
 def get_monthly_table(month_offset=0):
@@ -137,12 +137,11 @@ async def on_ready():
 # 出勤データを保存
 def save_start_time(user_id, start_time):
     try:
-        init_db()  # データベースを初期化
-        db_path = get_db_path()
-        with sqlite3.connect(db_path) as conn:
+        init_active_db()
+        with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
             c.execute('''
-                INSERT OR REPLACE INTO users (id, start_time, is_on_break, total_break_duration)
+                INSERT OR REPLACE INTO active_sessions (user_id, start_time, is_on_break, total_break_duration)
                 VALUES (?, ?, 0, 0)
             ''', (user_id, start_time))
             conn.commit()
@@ -153,12 +152,11 @@ def save_start_time(user_id, start_time):
 @bot.slash_command(name="start", description="出勤時に使うコマンド。出勤時間を記録します。")
 async def start(ctx):
     try:
-        init_db()
+        init_active_db()
         user_id = ctx.author.id
-        db_path = get_db_path()
-        with sqlite3.connect(db_path) as conn:
+        with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
-            c.execute('SELECT start_time, is_on_break FROM users WHERE id = ?', (user_id,))
+            c.execute('SELECT start_time, is_on_break FROM active_sessions WHERE user_id = ?', (user_id,))
             result = c.fetchone()
             
             if result:
@@ -168,10 +166,9 @@ async def start(ctx):
                     await ctx.respond(f"{ctx.author.mention} さん、既に出勤しています。")
                 return
 
-            # 出勤を記録
             start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             c.execute('''
-                INSERT INTO users (id, start_time, is_on_break, total_break_duration)
+                INSERT INTO active_sessions (user_id, start_time, is_on_break, total_break_duration)
                 VALUES (?, ?, 0, 0)
             ''', (user_id, start_time))
             conn.commit()
@@ -235,16 +232,12 @@ def save_work_history(user_id, start_time, end_time, break_duration, work_durati
 @bot.slash_command(name="end", description="退勤時に使うコマンド。退勤時間を記録し、勤務時間を表示します。")
 async def end(ctx):
     try:
-        init_db()
+        init_active_db()
         user_id = ctx.author.id
-        db_path = get_db_path()
         
-        # データベース接続
-        with sqlite3.connect(db_path) as conn:
+        with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
-            
-            # ユーザーの出勤記録を確認
-            c.execute('SELECT start_time, total_break_duration, is_on_break FROM users WHERE id = ?', (user_id,))
+            c.execute('SELECT start_time, total_break_duration, is_on_break FROM active_sessions WHERE user_id = ?', (user_id,))
             result = c.fetchone()
             
             # 出勤記録がない場合
@@ -266,7 +259,7 @@ async def end(ctx):
             save_work_history(user_id, result[0], end_time.strftime('%Y-%m-%d %H:%M:%S'), result[1], work_duration)
             
             # ユーザーデータを削除
-            c.execute('DELETE FROM users WHERE id = ?', (user_id,))
+            c.execute('DELETE FROM active_sessions WHERE user_id = ?', (user_id,))
             conn.commit()
             
             # 結果を表示
@@ -280,11 +273,10 @@ async def end(ctx):
 # 休憩開始のデータを保存
 def save_break_time(user_id, break_start_time):
     try:
-        init_db()  # データベースを初期化
-        db_path = get_db_path()
-        with sqlite3.connect(db_path) as conn:
+        init_active_db()
+        with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
-            c.execute('UPDATE users SET is_on_break = 1, break_start_time = ? WHERE id = ?', (break_start_time, user_id))
+            c.execute('UPDATE active_sessions SET is_on_break = 1, break_start_time = ? WHERE user_id = ?', (break_start_time, user_id))
             conn.commit()
     except Exception as e:
         print(f"Error saving break time: {e}")
@@ -293,12 +285,11 @@ def save_break_time(user_id, break_start_time):
 @bot.slash_command(name="break", description="休憩を開始するコマンド。休憩時間を記録します。")
 async def break_(ctx):
     try:
-        init_db()
+        init_active_db()
         user_id = ctx.author.id
-        db_path = get_db_path()
-        with sqlite3.connect(db_path) as conn:
+        with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
-            c.execute('SELECT start_time, is_on_break FROM users WHERE id = ?', (user_id,))
+            c.execute('SELECT start_time, is_on_break FROM active_sessions WHERE user_id = ?', (user_id,))
             result = c.fetchone()
 
         if not result or result[0] is None:
@@ -315,14 +306,13 @@ async def break_(ctx):
 # 休憩終了時に休憩時間を更新
 def update_break_duration(user_id, break_duration):
     try:
-        init_db()  # データベースを初期化
-        db_path = get_db_path()
-        with sqlite3.connect(db_path) as conn:
+        init_active_db()
+        with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
             c.execute('''
-                UPDATE users
+                UPDATE active_sessions
                 SET total_break_duration = total_break_duration + ?, is_on_break = 0
-                WHERE id = ?
+                WHERE user_id = ?
             ''', (break_duration, user_id))
             conn.commit()
     except Exception as e:
@@ -332,12 +322,11 @@ def update_break_duration(user_id, break_duration):
 @bot.slash_command(name="restart", description="休憩を終了するコマンド。累積休憩時間に休憩時間を追加します。")
 async def restart(ctx):
     try:
-        init_db()
+        init_active_db()
         user_id = ctx.author.id
-        db_path = get_db_path()
-        with sqlite3.connect(db_path) as conn:
+        with sqlite3.connect(ACTIVE_DB_PATH) as conn:
             c = conn.cursor()
-            c.execute('SELECT break_start_time FROM users WHERE id = ? AND is_on_break = 1', (user_id,))
+            c.execute('SELECT break_start_time FROM active_sessions WHERE user_id = ? AND is_on_break = 1', (user_id,))
             result = c.fetchone()
 
         if not result:
@@ -355,7 +344,6 @@ async def restart(ctx):
 @bot.slash_command(name="monthly", description="今月の合計勤務時間を表示するコマンドです。")
 async def monthly(ctx):
     try:
-        init_db()
         user_id = ctx.author.id
         db_path = get_db_path()
         table_name = get_monthly_table()
