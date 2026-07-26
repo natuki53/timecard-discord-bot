@@ -372,20 +372,13 @@ async def monthly(ctx):
 async def last_monthly(ctx):
     try:
         user_id = ctx.author.id
-        
-        # 先月の年と月を取得
-        today = datetime.datetime.now()
-        first_day_of_this_month = today.replace(day=1)
-        last_month = first_day_of_this_month - datetime.timedelta(days=1)
-        last_month_str = last_month.strftime('%Y_%m')
-        
-        # 先月のテーブル名を設定
-        table_name = f"history_{last_month_str}"
-        
-        # 先月のデータベースパスを取得
-        db_path = get_db_path()
-        
-        # データベース接続
+        table_name = f"history_{get_month_key(month_offset=-1)}"
+        db_path = get_db_path(month_offset=-1)
+
+        if not os.path.exists(db_path):
+            await ctx.respond(f"{ctx.author.mention} さん、先月の勤務履歴はありません。")
+            return
+
         with sqlite3.connect(db_path) as conn:
             c = conn.cursor()
             
