@@ -1,3 +1,5 @@
+name: timecard-discord-bot
+
 services:
   timecard-bot:
     build: .
