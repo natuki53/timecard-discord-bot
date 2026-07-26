@@ -18,7 +18,10 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 _attendance_channel_id = os.getenv('ATTENDANCE_CHANNEL_ID')
 ATTENDANCE_CHANNEL_ID = int(_attendance_channel_id) if _attendance_channel_id else None
 PANEL_MESSAGE_SETTING_KEY = 'attendance_panel_message_id'
-PANEL_MESSAGE_CONTENT = '操作パネル'
+EMBED_COLOR = 0xF1C40F
+
+def create_panel_embed() -> discord.Embed:
+    return discord.Embed(title='操作パネル', color=EMBED_COLOR)
 
 def validate_config():
     if not DB_DIR:
@@ -584,17 +587,19 @@ async def handle_attendance_button(interaction: discord.Interaction, action):
         )
         return
 
-    await interaction.response.defer(ephemeral=True)
-
     try:
         guild_id = interaction.guild.id
         await ensure_guild_ready(guild_id)
         message = await action(guild_id, interaction.user.id, interaction.user.mention)
-        await interaction.channel.send(message)
-        await refresh_attendance_panel(interaction.channel)
+        await interaction.response.send_message(message)
+        if isinstance(interaction.channel, discord.TextChannel):
+            await refresh_attendance_panel(interaction.channel)
     except Exception:
         logger.exception('Button action failed')
-        await interaction.followup.send(GENERIC_ERROR_MESSAGE, ephemeral=True)
+        if interaction.response.is_done():
+            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
+        else:
+            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
 
 class AttendancePanelView(discord.ui.View):
     def __init__(self):
@@ -653,7 +658,7 @@ async def refresh_attendance_panel(channel):
         except discord.Forbidden:
             logger.warning('Cannot delete old attendance panel message %s', old_id)
 
-    message = await channel.send(PANEL_MESSAGE_CONTENT, view=AttendancePanelView())
+    message = await channel.send(embed=create_panel_embed(), view=AttendancePanelView())
     await set_panel_message_id(message.id)
 
 async def refresh_attendance_panel_if_needed(channel):
@@ -665,8 +670,9 @@ async def ensure_attendance_panel(channel):
     panel_id = await get_panel_message_id()
     if panel_id:
         try:
-            await channel.fetch_message(panel_id)
-            return
+            msg = await channel.fetch_message(panel_id)
+            if msg.embeds and msg.components:
+                return
         except (discord.NotFound, discord.Forbidden):
             logger.info('Attendance panel message missing, reposting')
 
