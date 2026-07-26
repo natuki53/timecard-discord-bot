@@ -77,13 +77,15 @@ docker compose up -d --build
 
 ### 自動デプロイ（master 更新時）
 
-サーバーでは 5 分ごとに GitHub の master を確認し、更新があれば再ビルド・再起動します。
+GitHub の **push webhook** で master 更新を検知し、即座に再ビルド・再起動します。
 
-```bash
-sudo cp deploy/timecard-deploy.service deploy/timecard-deploy.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now timecard-deploy.timer
-```
+| 項目 | 値 |
+|------|-----|
+| Webhook URL | `https://mu-natuki.com/hooks/deploy-timecard-bot` |
+| イベント | `push`（`refs/heads/master` のみ） |
+| リポジトリ | `natuki53/timecard-discord-bot` |
+
+サーバー側では既存の [adnanh/webhook](https://github.com/adnanh/webhook) コンテナ（`deploy`）がフックを受信し、`scripts/deploy.sh` を実行します。`db/` と `.env` は Git 管理外のため上書きされません。
 
 手動デプロイ: `./scripts/deploy.sh`
 
