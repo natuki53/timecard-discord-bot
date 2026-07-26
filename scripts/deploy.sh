@@ -6,6 +6,7 @@ set -euo pipefail
 
 DEPLOY_DIR="${DEPLOY_DIR:-$HOME/services/discord-bots/timecard-discord-bot}"
 cd "$DEPLOY_DIR"
+export DB_VOLUME="${DEPLOY_DIR}/db"
 
 if [[ ! -d db ]]; then
   echo "ERROR: db/ が見つかりません。データ保護のため中断します。" >&2

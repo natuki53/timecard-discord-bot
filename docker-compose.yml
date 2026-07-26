@@ -8,7 +8,7 @@ services:
     env_file:
       - .env
     volumes:
-      - ./db:/data
+      - ${DB_VOLUME:-./db}:/data
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     environment:
