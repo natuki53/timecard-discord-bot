@@ -34,6 +34,46 @@ def get_month_key(month_offset=0):
         year -= 1
     return f'{year}_{month:02d}'
 
+def get_month_key_from_date(dt):
+    if isinstance(dt, datetime.datetime):
+        return dt.strftime('%Y_%m')
+    return dt.strftime('%Y_%m')
+
+def end_of_month(dt):
+    """指定日の属する月の最終秒を返す（12月→1月も正しく処理）"""
+    if isinstance(dt, datetime.date) and not isinstance(dt, datetime.datetime):
+        dt = datetime.datetime.combine(dt, datetime.time.min)
+    if dt.month == 12:
+        return datetime.datetime(dt.year + 1, 1, 1) - datetime.timedelta(seconds=1)
+    return datetime.datetime(dt.year, dt.month + 1, 1) - datetime.timedelta(seconds=1)
+
+def start_of_month(dt):
+    """指定日の属する月の開始日時を返す"""
+    if isinstance(dt, datetime.date) and not isinstance(dt, datetime.datetime):
+        return datetime.datetime.combine(dt.replace(day=1), datetime.time.min)
+    return datetime.datetime(dt.year, dt.month, 1)
+
+def get_db_path_for_date(dt):
+    return os.path.join(DB_DIR, f'work_tracking_{get_month_key_from_date(dt)}.db')
+
+def get_monthly_table_for_date(dt):
+    db_path = get_db_path_for_date(dt)
+    table_name = f"history_{get_month_key_from_date(dt)}"
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        c.execute(f'''
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                start_time TEXT,
+                end_time TEXT,
+                total_break_duration REAL,
+                work_duration REAL
+            )
+        ''')
+        conn.commit()
+    return table_name, db_path
+
 # 年と月ごとにデータベースファイルのパスを取得する関数
 def get_db_path(month_offset=0):
     db_path = os.path.join(DB_DIR, f'work_tracking_{get_month_key(month_offset)}.db')
@@ -137,20 +177,21 @@ def save_work_history(user_id, start_time, end_time, break_duration, work_durati
         start_date = datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S').date()
         end_date = datetime.datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S').date()
 
-        if start_date.month != end_date.month:
+        if start_date.year != end_date.year or start_date.month != end_date.month:
             # 出勤時間と退勤時間が異なる月にまたがる場合
-            end_of_start_month = datetime.datetime(start_date.year, start_date.month + 1, 1) - datetime.timedelta(seconds=1)
-            start_of_end_month = datetime.datetime(end_date.year, end_date.month, 1)
+            end_of_start_month = end_of_month(start_date)
+            start_of_end_month = start_of_month(end_date)
+
+            start_dt = datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
+            end_dt = datetime.datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
 
             # 最初の月のレコード
-            work_duration_first_month = (end_of_start_month - datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')).total_seconds() - break_duration
-            table_name_first_month = get_monthly_table()
-            db_path_first_month = get_db_path()
+            work_duration_first_month = (end_of_start_month - start_dt).total_seconds() - break_duration
+            table_name_first_month, db_path_first_month = get_monthly_table_for_date(start_date)
 
             # 次の月のレコード
-            work_duration_second_month = (datetime.datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S') - start_of_end_month).total_seconds()
-            table_name_second_month = get_monthly_table(month_offset=1)
-            db_path_second_month = get_db_path(month_offset=1)
+            work_duration_second_month = (end_dt - start_of_end_month).total_seconds()
+            table_name_second_month, db_path_second_month = get_monthly_table_for_date(end_date)
 
             with sqlite3.connect(db_path_first_month) as conn:
                 c = conn.cursor()
