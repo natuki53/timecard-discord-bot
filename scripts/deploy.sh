@@ -32,6 +32,6 @@ echo "$(date -Iseconds) Updating $LOCAL -> $REMOTE"
 git pull origin master
 
 docker compose build
-docker compose up -d --remove-orphans
+docker compose up -d --force-recreate --remove-orphans
 
 echo "$(date -Iseconds) Deployed $(git rev-parse --short HEAD)"
