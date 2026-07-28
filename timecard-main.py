@@ -33,6 +33,45 @@ def require_guild(interaction):
         return None
     return interaction.guild.id
 
+async def acknowledge_interaction(interaction):
+    """Discordの3秒制限より前にコマンド受信を確定する。"""
+    if interaction.response.is_done():
+        return True
+    try:
+        await interaction.response.defer(thinking=True)
+        return True
+    except discord.NotFound:
+        logger.warning(
+            'Interaction %s expired before it could be acknowledged',
+            interaction.id,
+        )
+    except discord.HTTPException:
+        logger.exception(
+            'Failed to acknowledge interaction %s',
+            interaction.id,
+        )
+    return False
+
+async def send_interaction_message(interaction, message):
+    """応答済み・応答待ちのどちらでも安全にメッセージを返す。"""
+    try:
+        if interaction.response.is_done():
+            await interaction.edit_original_response(content=message)
+        else:
+            await interaction.response.send_message(message)
+        return True
+    except discord.NotFound:
+        logger.warning(
+            'Interaction %s expired before a response could be delivered',
+            interaction.id,
+        )
+    except discord.HTTPException:
+        logger.exception(
+            'Failed to respond to interaction %s',
+            interaction.id,
+        )
+    return False
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -343,9 +382,12 @@ async def on_ready():
 @bot.tree.command(name='start', description='出勤時に使うコマンド。出勤時間を記録します。')
 async def start(interaction: discord.Interaction):
     try:
+        if not await acknowledge_interaction(interaction):
+            return
+
         guild_id = require_guild(interaction)
         if guild_id is None:
-            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
+            await send_interaction_message(interaction, 'このコマンドはサーバー内でのみ使用できます。')
             return
 
         await ensure_guild_ready(guild_id)
@@ -357,11 +399,13 @@ async def start(interaction: discord.Interaction):
             if result:
                 await conn.rollback()
                 if result[2] == 1:
-                    await interaction.response.send_message(
+                    await send_interaction_message(
+                        interaction,
                         f'{interaction.user.mention} さん、休憩中のため出勤できません。まずは /restart コマンドで休憩を終了してください。'
                     )
                 else:
-                    await interaction.response.send_message(
+                    await send_interaction_message(
+                        interaction,
                         f'{interaction.user.mention} さん、既に出勤しています。'
                     )
                 return
@@ -373,15 +417,13 @@ async def start(interaction: discord.Interaction):
             ''', (guild_id, user_id, start_time))
             await conn.commit()
 
-        await interaction.response.send_message(
+        await send_interaction_message(
+            interaction,
             f'{interaction.user.mention} さん、{start_time} に出勤しました。'
         )
     except Exception:
         logger.exception('Command failed')
-        if interaction.response.is_done():
-            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
-        else:
-            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
+        await send_interaction_message(interaction, GENERIC_ERROR_MESSAGE)
 
 async def save_work_history(guild_id, user_id, start_time, end_time, breaks, legacy_break_total=0):
     try:
@@ -435,9 +477,12 @@ async def save_work_history(guild_id, user_id, start_time, end_time, breaks, leg
 @bot.tree.command(name='end', description='退勤時に使うコマンド。退勤時間を記録し、勤務時間を表示します。')
 async def end(interaction: discord.Interaction):
     try:
+        if not await acknowledge_interaction(interaction):
+            return
+
         guild_id = require_guild(interaction)
         if guild_id is None:
-            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
+            await send_interaction_message(interaction, 'このコマンドはサーバー内でのみ使用できます。')
             return
 
         await ensure_guild_ready(guild_id)
@@ -449,14 +494,16 @@ async def end(interaction: discord.Interaction):
 
             if not result:
                 await conn.rollback()
-                await interaction.response.send_message(
+                await send_interaction_message(
+                    interaction,
                     f'{interaction.user.mention} さん、まだ出勤していません。/start を使用してください。'
                 )
                 return
 
             if result[2] == 1:
                 await conn.rollback()
-                await interaction.response.send_message(
+                await send_interaction_message(
+                    interaction,
                     f'{interaction.user.mention} さん、休憩中のため退勤できません。まずは /restart コマンドで休憩を終了してください。'
                 )
                 return
@@ -485,22 +532,23 @@ async def end(interaction: discord.Interaction):
 
         hours, remainder = divmod(work_duration, 3600)
         minutes = remainder // 60
-        await interaction.response.send_message(
+        await send_interaction_message(
+            interaction,
             f'{interaction.user.mention} さん、退勤しました。勤務時間は {int(hours)}時間{int(minutes)}分です。'
         )
     except Exception:
         logger.exception('Command failed')
-        if interaction.response.is_done():
-            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
-        else:
-            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
+        await send_interaction_message(interaction, GENERIC_ERROR_MESSAGE)
 
 @bot.tree.command(name='break', description='休憩を開始するコマンド。休憩時間を記録します。')
 async def break_(interaction: discord.Interaction):
     try:
+        if not await acknowledge_interaction(interaction):
+            return
+
         guild_id = require_guild(interaction)
         if guild_id is None:
-            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
+            await send_interaction_message(interaction, 'このコマンドはサーバー内でのみ使用できます。')
             return
 
         await ensure_guild_ready(guild_id)
@@ -511,12 +559,14 @@ async def break_(interaction: discord.Interaction):
 
             if not result or result[1] is None:
                 await conn.rollback()
-                await interaction.response.send_message(
+                await send_interaction_message(
+                    interaction,
                     f'{interaction.user.mention} さん、まずは /start で出勤してください。'
                 )
             elif result[2] == 1:
                 await conn.rollback()
-                await interaction.response.send_message(
+                await send_interaction_message(
+                    interaction,
                     f'{interaction.user.mention} さんは既に休憩中です。'
                 )
             else:
@@ -530,22 +580,23 @@ async def break_(interaction: discord.Interaction):
                     (guild_id, user_id, break_start_time)
                 )
                 await conn.commit()
-                await interaction.response.send_message(
+                await send_interaction_message(
+                    interaction,
                     f'{interaction.user.mention} さん、{break_start_time} に休憩を開始しました。'
                 )
     except Exception:
         logger.exception('Command failed')
-        if interaction.response.is_done():
-            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
-        else:
-            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
+        await send_interaction_message(interaction, GENERIC_ERROR_MESSAGE)
 
 @bot.tree.command(name='restart', description='休憩を終了するコマンド。累積休憩時間に休憩時間を追加します。')
 async def restart(interaction: discord.Interaction):
     try:
+        if not await acknowledge_interaction(interaction):
+            return
+
         guild_id = require_guild(interaction)
         if guild_id is None:
-            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
+            await send_interaction_message(interaction, 'このコマンドはサーバー内でのみ使用できます。')
             return
 
         await ensure_guild_ready(guild_id)
@@ -556,7 +607,8 @@ async def restart(interaction: discord.Interaction):
 
             if not result or result[2] != 1:
                 await conn.rollback()
-                await interaction.response.send_message(
+                await send_interaction_message(
+                    interaction,
                     f'{interaction.user.mention} さん、休憩中ではありません。/break で休憩を開始してください。'
                 )
             else:
@@ -575,22 +627,23 @@ async def restart(interaction: discord.Interaction):
                     )
                 ''', (break_end_time, user_id, guild_id, LEGACY_GUILD_ID))
                 await conn.commit()
-                await interaction.response.send_message(
+                await send_interaction_message(
+                    interaction,
                     f'{interaction.user.mention} さん、{break_end.strftime("%H:%M")} に休憩を終了しました。'
                 )
     except Exception:
         logger.exception('Command failed')
-        if interaction.response.is_done():
-            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
-        else:
-            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
+        await send_interaction_message(interaction, GENERIC_ERROR_MESSAGE)
 
 @bot.tree.command(name='monthly', description='今月の合計勤務時間を表示するコマンドです。')
 async def monthly(interaction: discord.Interaction):
     try:
+        if not await acknowledge_interaction(interaction):
+            return
+
         guild_id = require_guild(interaction)
         if guild_id is None:
-            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
+            await send_interaction_message(interaction, 'このコマンドはサーバー内でのみ使用できます。')
             return
 
         await ensure_guild_ready(guild_id)
@@ -609,26 +662,28 @@ async def monthly(interaction: discord.Interaction):
         if total_seconds:
             hours, remainder = divmod(total_seconds, 3600)
             minutes = remainder // 60
-            await interaction.response.send_message(
+            await send_interaction_message(
+                interaction,
                 f'{interaction.user.mention} さんの今月の合計勤務時間は {int(hours)}時間{int(minutes)}分です。'
             )
         else:
-            await interaction.response.send_message(
+            await send_interaction_message(
+                interaction,
                 f'{interaction.user.mention} さん、今月の勤務履歴はありません。'
             )
     except Exception:
         logger.exception('Command failed')
-        if interaction.response.is_done():
-            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
-        else:
-            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
+        await send_interaction_message(interaction, GENERIC_ERROR_MESSAGE)
 
 @bot.tree.command(name='last_monthly', description='先月の合計勤務時間を表示するコマンドです。')
 async def last_monthly(interaction: discord.Interaction):
     try:
+        if not await acknowledge_interaction(interaction):
+            return
+
         guild_id = require_guild(interaction)
         if guild_id is None:
-            await interaction.response.send_message('このコマンドはサーバー内でのみ使用できます。')
+            await send_interaction_message(interaction, 'このコマンドはサーバー内でのみ使用できます。')
             return
 
         await ensure_guild_ready(guild_id)
@@ -638,7 +693,8 @@ async def last_monthly(interaction: discord.Interaction):
         db_path = get_db_path(month_offset=-1)
 
         if not os.path.exists(db_path):
-            await interaction.response.send_message(
+            await send_interaction_message(
+                interaction,
                 f'{interaction.user.mention} さん、先月の勤務履歴はありません。'
             )
             return
@@ -651,7 +707,8 @@ async def last_monthly(interaction: discord.Interaction):
                 table_exists = await cursor.fetchone()
 
             if not table_exists:
-                await interaction.response.send_message(
+                await send_interaction_message(
+                    interaction,
                     f'{interaction.user.mention} さん、先月の勤務履歴はありません。'
                 )
                 return
@@ -666,18 +723,18 @@ async def last_monthly(interaction: discord.Interaction):
         if total_seconds:
             hours, remainder = divmod(total_seconds, 3600)
             minutes = remainder // 60
-            await interaction.response.send_message(
+            await send_interaction_message(
+                interaction,
                 f'{interaction.user.mention} さんの先月の合計勤務時間は {int(hours)}時間{int(minutes)}分です。'
             )
         else:
-            await interaction.response.send_message(
+            await send_interaction_message(
+                interaction,
                 f'{interaction.user.mention} さん、先月の勤務履歴はありません。'
             )
     except Exception:
         logger.exception('Command failed')
-        if interaction.response.is_done():
-            await interaction.followup.send(GENERIC_ERROR_MESSAGE)
-        else:
-            await interaction.response.send_message(GENERIC_ERROR_MESSAGE)
+        await send_interaction_message(interaction, GENERIC_ERROR_MESSAGE)
 
-bot.run(DISCORD_TOKEN)
+if __name__ == '__main__':
+    bot.run(DISCORD_TOKEN)
