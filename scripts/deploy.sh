@@ -8,6 +8,31 @@ DEPLOY_DIR="${DEPLOY_DIR:-$HOME/services/discord-bots/timecard-discord-bot}"
 cd "$DEPLOY_DIR"
 export DB_VOLUME="${DB_VOLUME:-${DEPLOY_DIR}/db}"
 
+restore_repository_ownership() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    return
+  fi
+
+  local owner_uid="${DEPLOY_OWNER_UID:-$(stat -c '%u' "$DEPLOY_DIR")}"
+  local owner_gid="${DEPLOY_OWNER_GID:-$(stat -c '%g' "$DEPLOY_DIR")}"
+  local path parent
+
+  chown -R "${owner_uid}:${owner_gid}" .git
+  chown "${owner_uid}:${owner_gid}" .
+
+  while IFS= read -r -d '' path; do
+    chown -h "${owner_uid}:${owner_gid}" "$path"
+    parent=$(dirname "$path")
+    while [[ "$parent" != "." ]]; do
+      chown "${owner_uid}:${owner_gid}" "$parent"
+      parent=$(dirname "$parent")
+    done
+  done < <(git ls-files -z)
+}
+
+# Webhookコンテナはrootで実行されるため、デプロイ後にホスト側の所有権を戻す。
+trap restore_repository_ownership EXIT
+
 if [[ ! -d db ]]; then
   echo "ERROR: db/ が見つかりません。データ保護のため中断します。" >&2
   exit 1
