@@ -75,14 +75,14 @@ docker compose up -d --build
 
 `db/` フォルダは Git 管理外です。コンテナ再作成・自動デプロイでも DB データは保持されます。
 
-### 自動デプロイ（master 更新時）
+### 自動デプロイ（main 更新時）
 
-GitHub の **push webhook** で master 更新を検知し、即座に再ビルド・再起動します。
+GitHub の **push webhook** で main 更新を検知し、即座に再ビルド・再起動します。
 
 | 項目 | 値 |
 |------|-----|
 | Webhook URL | `https://mu-natuki.com/hooks/deploy-timecard-bot` |
-| イベント | `push`（`refs/heads/master` のみ） |
+| イベント | `push`（`refs/heads/main` のみ） |
 | リポジトリ | `natuki53/timecard-discord-bot` |
 
 サーバー側では既存の [adnanh/webhook](https://github.com/adnanh/webhook) コンテナ（`deploy`）がフックを受信し、`scripts/deploy.sh` を実行します。`db/` と `.env` は Git 管理外のため上書きされません。

@@ -1,5 +1,5 @@
 #!/bin/bash
-# master 更新時に Bot を安全に再デプロイするスクリプト
+# main 更新時に Bot を安全に再デプロイするスクリプト
 # - db/ と .env は Git 管理外のため上書きされない
 # - db/ が存在しない場合は中断する
 set -euo pipefail
@@ -18,10 +18,10 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-git fetch origin master
+git fetch origin main
 
 LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse origin/master)
+REMOTE=$(git rev-parse origin/main)
 
 if [[ "$LOCAL" == "$REMOTE" ]]; then
   echo "$(date -Iseconds) Already up to date ($LOCAL)"
@@ -29,7 +29,7 @@ if [[ "$LOCAL" == "$REMOTE" ]]; then
 fi
 
 echo "$(date -Iseconds) Updating $LOCAL -> $REMOTE"
-git pull origin master
+git merge --ff-only origin/main
 
 docker compose build
 docker compose up -d --force-recreate --remove-orphans
