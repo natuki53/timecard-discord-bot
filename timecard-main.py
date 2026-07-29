@@ -6,6 +6,8 @@ import os
 import logging
 from dotenv import load_dotenv
 
+from bot_status import BotStatusReporter
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,11 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
+status_reporter = BotStatusReporter(
+    bot_id='timecard',
+    discord_connected=lambda: bot.is_ready() and not bot.is_closed(),
+    gateway_latency_ms=lambda: bot.latency * 1_000,
+)
 
 def get_month_key(month_offset=0):
     today = datetime.datetime.now()
@@ -367,6 +374,7 @@ async def fetch_active_session(conn, guild_id, user_id):
 
 @bot.event
 async def on_ready():
+    status_reporter.start()
     print(f'Logged in as {bot.user}')
     try:
         await migrate_legacy_data()

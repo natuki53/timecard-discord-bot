@@ -9,7 +9,9 @@ services:
       - .env
     volumes:
       - ${DB_VOLUME:-./db}:/data
+      - ${BOT_STATUS_HOST_DIR:-/home/natuki/services/runtime-status/timecard}:/run/bot-status
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     environment:
       - DB_DIR=/data
+      - BOT_STATUS_PATH=/run/bot-status/status.json
