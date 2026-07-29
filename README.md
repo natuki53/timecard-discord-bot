@@ -142,3 +142,14 @@ MIT License（予定）
 - 勤務時間の月別レポート出力
 - ボットの多言語対応
 - 勤務開始・終了時のリマインダー機能
+
+## 公開ステータス用ハートビート
+
+Docker Composeで起動すると、Botは10秒ごとに
+`/home/natuki/services/runtime-status/timecard/status.json`へ公開監視用の
+ハートビートを書き出します。初回起動前にホスト側のディレクトリをUID/GID
+`1000:1000`、モード`0750`で作成してください。
+
+出力にはBot ID、起動日時、更新日時、Discord接続状態、Gateway遅延だけを含め、
+トークン、サーバー名、ユーザー、メッセージ、ログは含めません。別のホストパスを
+使う場合はCompose実行時に`BOT_STATUS_HOST_DIR`を指定できます。
