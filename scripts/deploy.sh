@@ -7,6 +7,14 @@ set -euo pipefail
 DEPLOY_DIR="${DEPLOY_DIR:-$HOME/services/discord-bots/timecard-discord-bot}"
 cd "$DEPLOY_DIR"
 export DB_VOLUME="${DB_VOLUME:-${DEPLOY_DIR}/db}"
+LOCK_FILE="${TIMECARD_DEPLOY_LOCK_FILE:-${DEPLOY_DIR}/deploy/.deploy.lock}"
+
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "Another deployment or maintenance operation is already running."
+  exit 75
+fi
 
 restore_repository_ownership() {
   if [[ "$(id -u)" -ne 0 ]]; then
