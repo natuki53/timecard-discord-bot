@@ -7,6 +7,11 @@ import logging
 from dotenv import load_dotenv
 
 from bot_status import BotStatusReporter
+from member_directory import (
+    init_member_directory,
+    list_unresolved_member_ids,
+    upsert_member,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -189,6 +194,48 @@ async def init_active_db():
             )
         ''')
         await conn.commit()
+    await init_member_directory(ACTIVE_DB_PATH)
+
+async def remember_interaction_member(interaction):
+    if interaction.guild_id is None:
+        return
+    await upsert_member(
+        ACTIVE_DB_PATH,
+        interaction.guild_id,
+        interaction.user.id,
+        interaction.user.display_name,
+    )
+
+async def backfill_member_directory():
+    unresolved = await list_unresolved_member_ids(DB_DIR, ACTIVE_DB_PATH)
+    guilds = {guild.id: guild for guild in bot.guilds}
+    updated = 0
+    for guild_id, user_id in unresolved:
+        guild = guilds.get(guild_id)
+        if guild is None:
+            continue
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden):
+                continue
+            except discord.HTTPException:
+                logger.warning(
+                    "Failed to resolve Discord member %s in guild %s",
+                    user_id,
+                    guild_id,
+                )
+                continue
+        await upsert_member(
+            ACTIVE_DB_PATH,
+            guild_id,
+            user_id,
+            member.display_name,
+        )
+        updated += 1
+    if updated:
+        logger.info("Backfilled %d Timecard member name(s)", updated)
 
 async def get_session_breaks(guild_id, user_id, session_start):
     async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
@@ -379,6 +426,7 @@ async def on_ready():
     try:
         await migrate_legacy_data()
         print('旧DBの互換性チェック・移行が完了しました')
+        await backfill_member_directory()
     except Exception:
         logger.exception('Failed to migrate legacy data')
     try:
@@ -399,6 +447,7 @@ async def start(interaction: discord.Interaction):
             return
 
         await ensure_guild_ready(guild_id)
+        await remember_interaction_member(interaction)
         user_id = interaction.user.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('BEGIN IMMEDIATE')
@@ -494,6 +543,7 @@ async def end(interaction: discord.Interaction):
             return
 
         await ensure_guild_ready(guild_id)
+        await remember_interaction_member(interaction)
         user_id = interaction.user.id
 
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
@@ -560,6 +610,7 @@ async def break_(interaction: discord.Interaction):
             return
 
         await ensure_guild_ready(guild_id)
+        await remember_interaction_member(interaction)
         user_id = interaction.user.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('BEGIN IMMEDIATE')
@@ -608,6 +659,7 @@ async def restart(interaction: discord.Interaction):
             return
 
         await ensure_guild_ready(guild_id)
+        await remember_interaction_member(interaction)
         user_id = interaction.user.id
         async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
             await conn.execute('BEGIN IMMEDIATE')
@@ -655,6 +707,7 @@ async def monthly(interaction: discord.Interaction):
             return
 
         await ensure_guild_ready(guild_id)
+        await remember_interaction_member(interaction)
 
         user_id = interaction.user.id
         db_path = get_db_path()
@@ -695,6 +748,7 @@ async def last_monthly(interaction: discord.Interaction):
             return
 
         await ensure_guild_ready(guild_id)
+        await remember_interaction_member(interaction)
 
         user_id = interaction.user.id
         table_name = f"history_{get_month_key(month_offset=-1)}"
