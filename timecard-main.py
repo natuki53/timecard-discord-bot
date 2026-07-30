@@ -7,6 +7,7 @@ import logging
 from dotenv import load_dotenv
 
 from bot_status import BotStatusReporter
+from legacy_migration import migrate_legacy_users_once
 from member_directory import (
     init_member_directory,
     list_unresolved_member_ids,
@@ -271,56 +272,17 @@ async def get_monthly_table(month_offset=0):
     return table_name
 
 async def migrate_legacy_users_to_active_sessions():
-    """月別DBの users テーブルから active_sessions.db へ出勤中データを移行"""
-    if not os.path.isdir(DB_DIR):
-        return
-
-    legacy_sessions = {}
-    for filename in os.listdir(DB_DIR):
-        if not filename.startswith('work_tracking_') or not filename.endswith('.db'):
-            continue
-        db_path = os.path.join(DB_DIR, filename)
-        async with aiosqlite.connect(db_path) as conn:
-            async with conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
-            ) as cursor:
-                if not await cursor.fetchone():
-                    continue
-            async with conn.execute(
-                'SELECT id, start_time, is_on_break, break_start_time, total_break_duration FROM users'
-            ) as cursor:
-                rows = await cursor.fetchall()
-        for user_id, start_time, is_on_break, break_start_time, total_break_duration in rows:
-            if not start_time:
-                continue
-            existing = legacy_sessions.get(user_id)
-            if existing is None or start_time > existing[0]:
-                legacy_sessions[user_id] = (
-                    start_time, is_on_break, break_start_time, total_break_duration or 0
-                )
-
-    if not legacy_sessions:
-        return
-
-    async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
-        for user_id, (start_time, is_on_break, break_start_time, total_break_duration) in legacy_sessions.items():
-            async with conn.execute(
-                'SELECT 1 FROM active_sessions WHERE user_id = ?',
-                (user_id,)
-            ) as cursor:
-                if await cursor.fetchone():
-                    continue
-            await conn.execute('''
-                INSERT INTO active_sessions (guild_id, user_id, start_time, is_on_break, break_start_time, total_break_duration)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (LEGACY_GUILD_ID, user_id, start_time, is_on_break or 0, break_start_time, total_break_duration))
-            if is_on_break and break_start_time:
-                await conn.execute('''
-                    INSERT INTO break_records (guild_id, user_id, break_start)
-                    VALUES (?, ?, ?)
-                ''', (LEGACY_GUILD_ID, user_id, break_start_time))
-        await conn.commit()
-    logger.info('Migrated %d legacy active session(s) from monthly DBs', len(legacy_sessions))
+    """月別DBの users テーブルを初回だけ active_sessions.db へ移行"""
+    result = await migrate_legacy_users_once(
+        DB_DIR,
+        ACTIVE_DB_PATH,
+        legacy_guild_id=LEGACY_GUILD_ID,
+    )
+    logger.info(
+        'Legacy active-session migration: %s (%d imported)',
+        result['status'],
+        result['migrated'],
+    )
 
 async def migrate_legacy_history_tables():
     """既存の history テーブルに guild_id カラムを追加"""
