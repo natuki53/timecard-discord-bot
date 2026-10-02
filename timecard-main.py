@@ -1,12 +1,20 @@
 import discord
 from discord.ext import commands
-import datetime
+import asyncio
 import aiosqlite
 import os
 import logging
 from dotenv import load_dotenv
 
 from bot_status import BotStatusReporter
+from monthly_history import (
+    JST,
+    close_finished_months,
+    finish_session,
+    init_monthly_history_schema,
+    next_month_start,
+    now_jst,
+)
 from legacy_migration import migrate_legacy_users_once
 from member_directory import (
     init_member_directory,
@@ -91,7 +99,7 @@ status_reporter = BotStatusReporter(
 )
 
 def get_month_key(month_offset=0):
-    today = datetime.datetime.now()
+    today = now_jst()
     year = today.year
     month = today.month + month_offset
     while month > 12:
@@ -101,39 +109,6 @@ def get_month_key(month_offset=0):
         month += 12
         year -= 1
     return f'{year}_{month:02d}'
-
-def get_month_key_from_date(dt):
-    if isinstance(dt, datetime.datetime):
-        return dt.strftime('%Y_%m')
-    return dt.strftime('%Y_%m')
-
-def end_of_month(dt):
-    if isinstance(dt, datetime.date) and not isinstance(dt, datetime.datetime):
-        dt = datetime.datetime.combine(dt, datetime.time.min)
-    if dt.month == 12:
-        return datetime.datetime(dt.year + 1, 1, 1) - datetime.timedelta(seconds=1)
-    return datetime.datetime(dt.year, dt.month + 1, 1) - datetime.timedelta(seconds=1)
-
-def start_of_month(dt):
-    if isinstance(dt, datetime.date) and not isinstance(dt, datetime.datetime):
-        return datetime.datetime.combine(dt.replace(day=1), datetime.time.min)
-    return datetime.datetime(dt.year, dt.month, 1)
-
-def get_db_path_for_date(dt):
-    return os.path.join(DB_DIR, f'work_tracking_{get_month_key_from_date(dt)}.db')
-
-def overlap_seconds(range_start, range_end, break_start, break_end):
-    overlap_start = max(range_start, break_start)
-    overlap_end = min(range_end, break_end)
-    if overlap_start >= overlap_end:
-        return 0
-    return (overlap_end - overlap_start).total_seconds()
-
-def calculate_break_in_range(range_start, range_end, breaks):
-    return sum(
-        overlap_seconds(range_start, range_end, break_start, break_end)
-        for break_start, break_end in breaks
-    )
 
 HISTORY_TABLE_SCHEMA = '''
     CREATE TABLE IF NOT EXISTS {table_name} (
@@ -154,20 +129,12 @@ async def ensure_history_schema(conn, table_name):
     if 'guild_id' not in columns:
         await conn.execute(f'ALTER TABLE {table_name} ADD COLUMN guild_id INTEGER')
 
-async def get_monthly_table_for_date(dt):
-    db_path = get_db_path_for_date(dt)
-    table_name = f"history_{get_month_key_from_date(dt)}"
-    async with aiosqlite.connect(db_path) as conn:
-        await conn.execute(HISTORY_TABLE_SCHEMA.format(table_name=table_name))
-        await ensure_history_schema(conn, table_name)
-        await conn.commit()
-    return table_name, db_path
-
 def get_db_path(month_offset=0):
     return os.path.join(DB_DIR, f'work_tracking_{get_month_key(month_offset)}.db')
 
 async def init_active_db():
     async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
+        await conn.execute('BEGIN IMMEDIATE')
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS active_sessions (
                 guild_id INTEGER NOT NULL,
@@ -194,6 +161,7 @@ async def init_active_db():
                 value TEXT NOT NULL
             )
         ''')
+        await init_monthly_history_schema(conn)
         await conn.commit()
     await init_member_directory(ACTIVE_DB_PATH)
 
@@ -237,30 +205,6 @@ async def backfill_member_directory():
         updated += 1
     if updated:
         logger.info("Backfilled %d Timecard member name(s)", updated)
-
-async def get_session_breaks(guild_id, user_id, session_start):
-    async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
-        async with conn.execute('''
-            SELECT break_start, break_end FROM break_records
-            WHERE user_id = ? AND (guild_id = ? OR guild_id = ?)
-              AND break_start >= ? AND break_end IS NOT NULL
-        ''', (user_id, guild_id, LEGACY_GUILD_ID, session_start)) as cursor:
-            rows = await cursor.fetchall()
-    breaks = []
-    for break_start_str, break_end_str in rows:
-        breaks.append((
-            datetime.datetime.strptime(break_start_str, '%Y-%m-%d %H:%M:%S'),
-            datetime.datetime.strptime(break_end_str, '%Y-%m-%d %H:%M:%S'),
-        ))
-    return breaks
-
-async def delete_session_breaks(guild_id, user_id, session_start):
-    async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
-        await conn.execute('''
-            DELETE FROM break_records
-            WHERE user_id = ? AND (guild_id = ? OR guild_id = ?) AND break_start >= ?
-        ''', (user_id, guild_id, LEGACY_GUILD_ID, session_start))
-        await conn.commit()
 
 async def get_monthly_table(month_offset=0):
     db_path = get_db_path(month_offset)
@@ -331,6 +275,10 @@ async def assign_all_legacy_data_to_guild(guild_id):
             (guild_id, LEGACY_GUILD_ID)
         )
         await conn.execute(
+            'UPDATE history_outbox SET guild_id = ? WHERE guild_id = ?',
+            (guild_id, LEGACY_GUILD_ID)
+        )
+        await conn.execute(
             "INSERT INTO app_settings (key, value) VALUES ('legacy_guild_id', ?)",
             (str(guild_id),)
         )
@@ -366,6 +314,7 @@ async def assign_all_legacy_data_to_guild(guild_id):
 async def ensure_guild_ready(guild_id):
     await init_active_db()
     await assign_all_legacy_data_to_guild(guild_id)
+    await close_finished_months(DB_DIR, ACTIVE_DB_PATH)
 
 async def migrate_legacy_data():
     await init_active_db()
@@ -381,6 +330,22 @@ async def fetch_active_session(conn, guild_id, user_id):
     ''', (user_id, guild_id, LEGACY_GUILD_ID)) as cursor:
         return await cursor.fetchone()
 
+monthly_close_task = None
+
+async def monthly_close():
+    while not bot.is_closed():
+        deadline = next_month_start(now_jst()).replace(tzinfo=JST)
+        await discord.utils.sleep_until(deadline)
+        try:
+            await close_finished_months(DB_DIR, ACTIVE_DB_PATH)
+        except Exception:
+            logger.exception('Failed to close completed work months; pending data retained')
+
+def start_monthly_close():
+    global monthly_close_task
+    if monthly_close_task is None or monthly_close_task.done():
+        monthly_close_task = asyncio.create_task(monthly_close())
+
 @bot.event
 async def on_ready():
     status_reporter.start()
@@ -388,6 +353,8 @@ async def on_ready():
     try:
         await migrate_legacy_data()
         print('旧DBの互換性チェック・移行が完了しました')
+        start_monthly_close()
+        await close_finished_months(DB_DIR, ACTIVE_DB_PATH)
         await backfill_member_directory()
     except Exception:
         logger.exception('Failed to migrate legacy data')
@@ -429,7 +396,7 @@ async def start(interaction: discord.Interaction):
                     )
                 return
 
-            start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            start_time = now_jst().strftime('%Y-%m-%d %H:%M:%S')
             await conn.execute('''
                 INSERT INTO active_sessions (guild_id, user_id, start_time, is_on_break, total_break_duration)
                 VALUES (?, ?, ?, 0, 0)
@@ -443,55 +410,6 @@ async def start(interaction: discord.Interaction):
     except Exception:
         logger.exception('Command failed')
         await send_interaction_message(interaction, GENERIC_ERROR_MESSAGE)
-
-async def save_work_history(guild_id, user_id, start_time, end_time, breaks, legacy_break_total=0):
-    try:
-        start_date = datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S').date()
-        end_date = datetime.datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S').date()
-        start_dt = datetime.datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
-        end_dt = datetime.datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
-        total_break = calculate_break_in_range(start_dt, end_dt, breaks)
-        if total_break == 0 and legacy_break_total > 0:
-            total_break = legacy_break_total
-
-        if start_date.year != end_date.year or start_date.month != end_date.month:
-            end_of_start_month = end_of_month(start_date)
-            start_of_end_month = start_of_month(end_date)
-
-            break_first = calculate_break_in_range(start_dt, end_of_start_month, breaks)
-            break_second = calculate_break_in_range(start_of_end_month, end_dt, breaks)
-            if break_first + break_second == 0 and legacy_break_total > 0:
-                break_first = legacy_break_total
-            work_duration_first_month = max(0, (end_of_start_month - start_dt).total_seconds() - break_first)
-            work_duration_second_month = max(0, (end_dt - start_of_end_month).total_seconds() - break_second)
-            table_name_first_month, db_path_first_month = await get_monthly_table_for_date(start_date)
-            table_name_second_month, db_path_second_month = await get_monthly_table_for_date(end_date)
-
-            async with aiosqlite.connect(db_path_first_month) as conn:
-                await conn.execute(f'''
-                    INSERT INTO {table_name_first_month} (guild_id, user_id, start_time, end_time, total_break_duration, work_duration)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (guild_id, user_id, start_time, end_of_start_month.strftime('%Y-%m-%d %H:%M:%S'), break_first, work_duration_first_month))
-                await conn.commit()
-
-            async with aiosqlite.connect(db_path_second_month) as conn:
-                await conn.execute(f'''
-                    INSERT INTO {table_name_second_month} (guild_id, user_id, start_time, end_time, total_break_duration, work_duration)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (guild_id, user_id, start_of_end_month.strftime('%Y-%m-%d %H:%M:%S'), end_time, break_second, work_duration_second_month))
-                await conn.commit()
-        else:
-            work_duration = max(0, (end_dt - start_dt).total_seconds() - total_break)
-            table_name = await get_monthly_table()
-            db_path = get_db_path()
-            async with aiosqlite.connect(db_path) as conn:
-                await conn.execute(f'''
-                    INSERT INTO {table_name} (guild_id, user_id, start_time, end_time, total_break_duration, work_duration)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (guild_id, user_id, start_time, end_time, total_break, work_duration))
-                await conn.commit()
-    except Exception:
-        logger.exception('Failed to save work history')
 
 @bot.tree.command(name='end', description='退勤時に使うコマンド。退勤時間を記録し、勤務時間を表示します。')
 async def end(interaction: discord.Interaction):
@@ -508,49 +426,21 @@ async def end(interaction: discord.Interaction):
         await remember_interaction_member(interaction)
         user_id = interaction.user.id
 
-        async with aiosqlite.connect(ACTIVE_DB_PATH) as conn:
-            await conn.execute('BEGIN IMMEDIATE')
-            result = await fetch_active_session(conn, guild_id, user_id)
-
-            if not result:
-                await conn.rollback()
-                await send_interaction_message(
-                    interaction,
-                    f'{interaction.user.mention} さん、まだ出勤していません。/start を使用してください。'
-                )
-                return
-
-            if result[2] == 1:
-                await conn.rollback()
-                await send_interaction_message(
-                    interaction,
-                    f'{interaction.user.mention} さん、休憩中のため退勤できません。まずは /restart コマンドで休憩を終了してください。'
-                )
-                return
-
-            session_start_str = result[1]
-            legacy_break_total = result[4] or 0
-            start_time = datetime.datetime.strptime(session_start_str, '%Y-%m-%d %H:%M:%S')
-            end_time = datetime.datetime.now()
-            breaks = await get_session_breaks(guild_id, user_id, session_start_str)
-            break_total = calculate_break_in_range(start_time, end_time, breaks)
-            if break_total == 0 and legacy_break_total > 0:
-                break_total = legacy_break_total
-            work_duration = max(0, (end_time - start_time).total_seconds() - break_total)
-
-            await conn.execute(
-                'DELETE FROM active_sessions WHERE user_id = ? AND (guild_id = ? OR guild_id = ?)',
-                (user_id, guild_id, LEGACY_GUILD_ID)
+        result = await finish_session(DB_DIR, ACTIVE_DB_PATH, guild_id, user_id)
+        if result['status'] == 'not_started':
+            await send_interaction_message(
+                interaction,
+                f'{interaction.user.mention} さん、まだ出勤していません。/start を使用してください。'
             )
-            await conn.commit()
+            return
+        if result['status'] == 'on_break':
+            await send_interaction_message(
+                interaction,
+                f'{interaction.user.mention} さん、休憩中のため退勤できません。まずは /restart コマンドで休憩を終了してください。'
+            )
+            return
 
-        await save_work_history(
-            guild_id, user_id, session_start_str,
-            end_time.strftime('%Y-%m-%d %H:%M:%S'), breaks, legacy_break_total
-        )
-        await delete_session_breaks(guild_id, user_id, session_start_str)
-
-        hours, remainder = divmod(work_duration, 3600)
+        hours, remainder = divmod(result['work_duration'], 3600)
         minutes = remainder // 60
         await send_interaction_message(
             interaction,
@@ -591,7 +481,7 @@ async def break_(interaction: discord.Interaction):
                     f'{interaction.user.mention} さんは既に休憩中です。'
                 )
             else:
-                break_start_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                break_start_time = now_jst().strftime('%Y-%m-%d %H:%M:%S')
                 await conn.execute(
                     'UPDATE active_sessions SET is_on_break = 1, break_start_time = ? WHERE user_id = ? AND (guild_id = ? OR guild_id = ?)',
                     (break_start_time, user_id, guild_id, LEGACY_GUILD_ID)
@@ -634,7 +524,7 @@ async def restart(interaction: discord.Interaction):
                     f'{interaction.user.mention} さん、休憩中ではありません。/break で休憩を開始してください。'
                 )
             else:
-                break_end = datetime.datetime.now()
+                break_end = now_jst()
                 break_end_time = break_end.strftime('%Y-%m-%d %H:%M:%S')
                 await conn.execute('''
                     UPDATE active_sessions SET is_on_break = 0

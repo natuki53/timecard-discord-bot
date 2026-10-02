@@ -1,3 +1,4 @@
+from contextlib import closing
 import asyncio
 import os
 import sqlite3
@@ -23,7 +24,7 @@ class MemberDirectoryTests(unittest.TestCase):
             active_path = os.path.join(db_dir, "active_sessions.db")
             asyncio.run(init_member_directory(active_path))
 
-            with sqlite3.connect(active_path) as conn:
+            with closing(sqlite3.connect(active_path)) as conn, conn:
                 conn.execute(
                     """
                     CREATE TABLE active_sessions (
@@ -42,7 +43,7 @@ class MemberDirectoryTests(unittest.TestCase):
                 )
 
             month_path = os.path.join(db_dir, "work_tracking_2026_07.db")
-            with sqlite3.connect(month_path) as conn:
+            with closing(sqlite3.connect(month_path)) as conn, conn:
                 conn.execute(
                     """
                     CREATE TABLE history_2026_07 (
@@ -72,7 +73,7 @@ class MemberDirectoryTests(unittest.TestCase):
             )
             self.assertEqual(unresolved, [(10, 30)])
 
-            with sqlite3.connect(active_path) as conn:
+            with closing(sqlite3.connect(active_path)) as conn, conn:
                 row = conn.execute(
                     """
                     SELECT display_name
