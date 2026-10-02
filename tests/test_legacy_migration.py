@@ -1,3 +1,4 @@
+from contextlib import closing
 import asyncio
 import os
 import sqlite3
@@ -11,7 +12,7 @@ from legacy_migration import (
 
 
 def create_active_db(path, *, legacy_guild_id=None):
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute(
             """
             CREATE TABLE active_sessions (
@@ -52,7 +53,7 @@ def create_active_db(path, *, legacy_guild_id=None):
 
 
 def create_month_db(path, sessions):
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute(
             """
             CREATE TABLE users (
@@ -98,7 +99,7 @@ class LegacyMigrationTests(unittest.TestCase):
             )
             self.assertEqual(result, {"status": "completed", "migrated": 2})
 
-            with sqlite3.connect(active_path) as conn:
+            with closing(sqlite3.connect(active_path)) as conn, conn:
                 active = conn.execute(
                     """
                     SELECT user_id, start_time, is_on_break
@@ -132,7 +133,7 @@ class LegacyMigrationTests(unittest.TestCase):
             self.assertEqual(
                 repeated, {"status": "already_completed", "migrated": 0}
             )
-            with sqlite3.connect(active_path) as conn:
+            with closing(sqlite3.connect(active_path)) as conn, conn:
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) FROM active_sessions").fetchone()[0],
                     0,
@@ -153,7 +154,7 @@ class LegacyMigrationTests(unittest.TestCase):
             self.assertEqual(
                 result, {"status": "adopted_existing", "migrated": 0}
             )
-            with sqlite3.connect(active_path) as conn:
+            with closing(sqlite3.connect(active_path)) as conn, conn:
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) FROM active_sessions").fetchone()[0],
                     0,
@@ -168,7 +169,7 @@ class LegacyMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as db_dir:
             active_path = os.path.join(db_dir, "active_sessions.db")
             create_active_db(active_path)
-            with sqlite3.connect(active_path) as conn:
+            with closing(sqlite3.connect(active_path)) as conn, conn:
                 conn.execute(
                     """
                     INSERT INTO active_sessions (
@@ -188,7 +189,7 @@ class LegacyMigrationTests(unittest.TestCase):
             )
             self.assertEqual(result, {"status": "completed", "migrated": 0})
 
-            with sqlite3.connect(active_path) as conn:
+            with closing(sqlite3.connect(active_path)) as conn, conn:
                 current = conn.execute(
                     "SELECT guild_id, start_time FROM active_sessions WHERE user_id = 10"
                 ).fetchone()
@@ -202,7 +203,7 @@ class LegacyMigrationTests(unittest.TestCase):
             self.assertEqual(
                 repeated, {"status": "already_completed", "migrated": 0}
             )
-            with sqlite3.connect(active_path) as conn:
+            with closing(sqlite3.connect(active_path)) as conn, conn:
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) FROM active_sessions").fetchone()[0],
                     0,
